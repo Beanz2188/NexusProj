@@ -13,7 +13,7 @@ from .base import LightProtocol
 
 class ElkBledomProtocol(LightProtocol):
     name = "elkbledom"
-    write_characteristic = "0000fff3-0000-1000-8000-00805f9a34fb"
+    write_characteristic = "0000fff3-0000-1000-8000-00805f9b34fb"
     name_hints = (
         "elk-ble",
         "elk-bulb",

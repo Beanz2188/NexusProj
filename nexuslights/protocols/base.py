@@ -22,6 +22,15 @@ class LightProtocol(ABC):
     #: BLE GATT characteristic (UUID string) that commands are written to.
     write_characteristic: str
 
+    #: Optional notify characteristic that must be subscribed to before the
+    #: device will accept writes (some chipsets otherwise silently ignore
+    #: every command). Most protocols don't need this.
+    notify_characteristic: str | None = None
+
+    #: Whether writes should be sent as a BLE "Write Request" (waits for a
+    #: response) rather than the default "Write Command" (fire-and-forget).
+    write_with_response: bool = False
+
     #: Substrings of BLE advertised device names known to use this protocol.
     #: Used by discovery to suggest a protocol; not authoritative.
     name_hints: tuple[str, ...] = ()

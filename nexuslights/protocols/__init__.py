@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from .base import LightProtocol
 from .elkbledom import ElkBledomProtocol
+from .lednetwf import LedNetWFProtocol
 from .triones import TrionesProtocol
 
 #: All protocols the toolkit ships with, keyed by their ``name``.
 REGISTRY: dict[str, type[LightProtocol]] = {
     TrionesProtocol.name: TrionesProtocol,
     ElkBledomProtocol.name: ElkBledomProtocol,
+    LedNetWFProtocol.name: LedNetWFProtocol,
 }
 
 

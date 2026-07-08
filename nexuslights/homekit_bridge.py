@@ -55,6 +55,7 @@ class RgbLightAccessory(Accessory):
         self._hue = 0.0
         self._saturation = 0.0
         self._brightness = 100
+        self._rgb_generation = 0
 
         service = self.add_preload_service("Lightbulb", chars=["Brightness", "Hue", "Saturation"])
         self.char_on = service.configure_char("On", setter_callback=self._set_on)
@@ -63,8 +64,25 @@ class RgbLightAccessory(Accessory):
         self.char_saturation = service.configure_char("Saturation", setter_callback=self._set_saturation)
 
     def _push_rgb(self) -> None:
-        r, g, b = colorsys.hsv_to_rgb(self._hue / 360.0, self._saturation / 100.0, self._brightness / 100.0)
-        self.ble_loop.run(self.ble_light.set_rgb(round(r * 255), round(g * 255), round(b * 255)))
+        # HomeKit fires Hue/Saturation/Brightness as separate rapid-fire
+        # characteristic writes while dragging the color picker. Each BLE
+        # write is a slow round trip, so a burst of drag events queues up
+        # behind a single connection. Tag every push with a generation
+        # number and have queued sends bail out if a newer one has already
+        # been requested, so only the final color in a burst reaches the
+        # light instead of it visibly working through stale intermediate
+        # colors.
+        self._rgb_generation += 1
+        generation = self._rgb_generation
+        hue, saturation, brightness = self._hue, self._saturation, self._brightness
+
+        async def _send() -> None:
+            if generation != self._rgb_generation:
+                return
+            r, g, b = colorsys.hsv_to_rgb(hue / 360.0, saturation / 100.0, brightness / 100.0)
+            await self.ble_light.set_rgb(round(r * 255), round(g * 255), round(b * 255))
+
+        self.ble_loop.run(_send())
 
     def _set_on(self, value: bool) -> None:
         if value:
@@ -98,6 +116,13 @@ def build_bridge(driver: AccessoryDriver) -> Bridge:
     bridge = Bridge(driver, "NexusLights")
     for light_cfg in config.lights:
         ble_light = BleLight(light_cfg.address, light_cfg.protocol)
+        try:
+            ble_loop.run(ble_light.connect(), timeout=15.0)
+        except Exception:
+            # Don't let one unreachable light (off, out of range) take the
+            # whole bridge down. _write() connects on demand, so this light
+            # will just reconnect lazily on its first real command.
+            logger.warning("Could not connect to %r at startup; will retry on first command", light_cfg.name)
         bridge.add_accessory(RgbLightAccessory(driver, light_cfg.name, ble_light, ble_loop))
     return bridge
 

@@ -75,6 +75,10 @@ class BleLight:
         bleak = _require_bleak()
         self._client = bleak.BleakClient(self.address)
         await self._client.connect()
+        if self.protocol.notify_characteristic is not None:
+            # Some chipsets (e.g. LEDnetWF) silently ignore every write
+            # until a client has subscribed to notifications.
+            await self._client.start_notify(self.protocol.notify_characteristic, lambda *_: None)
 
     async def disconnect(self) -> None:
         if self._client is not None:
@@ -91,7 +95,15 @@ class BleLight:
     async def _write(self, payload: bytes) -> None:
         if self._client is None:
             raise RuntimeError("Light is not connected; use 'async with light:' first")
-        await self._client.write_gatt_char(self.protocol.write_characteristic, payload, response=False)
+        if not self._client.is_connected:
+            # The BLE link can drop on its own (range, interference, the
+            # peripheral's own timeout) between long-lived connections such
+            # as the HomeKit bridge's. Reconnect on demand rather than
+            # failing every write from here on.
+            await self.connect()
+        await self._client.write_gatt_char(
+            self.protocol.write_characteristic, payload, response=self.protocol.write_with_response
+        )
 
     async def power_on(self) -> None:
         await self._write(self.protocol.power_on())

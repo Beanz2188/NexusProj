@@ -20,6 +20,7 @@ import click
 
 from .ble_transport import BleLight, scan as ble_scan
 from .manager import LightManager
+from .protocols import REGISTRY
 
 
 def _run(coro):
@@ -47,7 +48,7 @@ def scan(timeout: float) -> None:
 @main.command()
 @click.argument("address")
 @click.argument("name")
-@click.option("--protocol", required=True, type=click.Choice(["triones", "elkbledom"]))
+@click.option("--protocol", required=True, type=click.Choice(sorted(REGISTRY)))
 def add(address: str, name: str, protocol: str) -> None:
     """Save a light to the config so it can be controlled by NAME later."""
     manager = LightManager()
@@ -112,7 +113,7 @@ def brightness(name: str, percent: int) -> None:
 
 @main.command()
 @click.argument("address")
-@click.argument("protocol", type=click.Choice(["triones", "elkbledom"]))
+@click.argument("protocol", type=click.Choice(sorted(REGISTRY)))
 @click.argument("hex_payload")
 def raw(address: str, protocol: str, hex_payload: str) -> None:
     """Send raw hex bytes to a light. For tuning a protocol against real
