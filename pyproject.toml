@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nexuslights"
+version = "0.1.0"
+description = "One CLI to control BLE RGB light strips and bridge them to Apple HomeKit"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "bleak>=0.21",
+    "click>=8.1",
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+homekit = ["HAP-python>=4.9"]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+nexus-lights = "nexuslights.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["nexuslights*"]

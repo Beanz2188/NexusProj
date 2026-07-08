@@ -1,0 +1,6 @@
+bleak>=0.21
+click>=8.1
+PyYAML>=6.0
+
+# Optional, only needed for `nexus-lights bridge` (Apple HomeKit):
+# HAP-python>=4.9
