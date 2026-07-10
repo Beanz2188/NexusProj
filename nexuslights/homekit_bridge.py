@@ -40,7 +40,12 @@ class _BleLoop:
         self._thread = threading.Thread(target=self._loop.run_forever, daemon=True)
         self._thread.start()
 
-    def run(self, coro, timeout: float = 5.0):
+    def run(self, coro, timeout: float = 20.0):
+        # BleLight.connect() scans for the device (up to 10s) before
+        # connecting, so a mid-session reconnect after the BLE link drops
+        # can legitimately take longer than a plain write. 5s wasn't
+        # enough headroom for that and caused spurious TimeoutErrors on
+        # otherwise-successful reconnects.
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
         return future.result(timeout=timeout)
 
