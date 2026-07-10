@@ -114,7 +114,14 @@ def build_bridge(driver: AccessoryDriver) -> Bridge:
 
     ble_loop = _BleLoop()
     bridge = Bridge(driver, "NexusLights")
-    for light_cfg in config.lights:
+    # HAP-python auto-assigns each accessory's AID by the order add_accessory()
+    # is called, and HomeKit pairings cache AID per accessory. Config.upsert()
+    # re-appends an entry when it's updated, which reorders config.lights and
+    # would otherwise silently reassign AIDs -- breaking existing HomeKit
+    # pairings for lights whose config hasn't even changed. Iterating in a
+    # stable order (by address, which never changes for a given light) keeps
+    # AID assignment consistent across config edits.
+    for light_cfg in sorted(config.lights, key=lambda l: l.address):
         ble_light = BleLight(light_cfg.address, light_cfg.protocol)
         try:
             ble_loop.run(ble_light.connect(), timeout=15.0)
