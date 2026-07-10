@@ -73,7 +73,14 @@ class BleLight:
 
     async def connect(self) -> None:
         bleak = _require_bleak()
-        self._client = bleak.BleakClient(self.address)
+        # Resolve to a BLEDevice via an explicit scan first rather than
+        # handing bleak a bare address string. Constructed from a string,
+        # BleakClient.connect() does its own internal scan-by-address before
+        # connecting; in practice that path has been noticeably less
+        # reliable on macOS (writes silently not taking effect) than
+        # scanning first and connecting to the resulting device object.
+        device = await bleak.BleakScanner.find_device_by_address(self.address, timeout=10.0)
+        self._client = bleak.BleakClient(device if device is not None else self.address)
         await self._client.connect()
         if self.protocol.notify_characteristic is not None:
             # Some chipsets (e.g. LEDnetWF) silently ignore every write
