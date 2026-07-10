@@ -9,3 +9,5 @@ venv/
 
 # HomeKit pairing state - contains this bridge's identity, don't share it
 nexuslights_homekit.state
+
+*.log
