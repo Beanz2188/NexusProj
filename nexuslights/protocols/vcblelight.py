@@ -6,12 +6,12 @@ for the original -- but partially incorrect -- reverse engineering; the
 capture showed two corrections: color frames are 7 bytes with 3 trailing
 zero bytes, not 4, and brightness is a 0-100 percentage, not 0-255).
 
-Known issue: writes are accepted with no GATT error but the device does
-not react, on every host tried so far. The real app's connection may be
-bonded/encrypted in a way a plain unauthenticated connect() doesn't
-satisfy. Unconfirmed working end-to-end -- revisit once this can be
-tested from a Linux/BlueZ host, which handles BLE bonding differently
-than macOS Core Bluetooth.
+The write characteristic and write type were wrong in an earlier version
+of this file (guessed from an ATT opcode in the capture without a
+confirmed handle-to-UUID mapping). Decompiling the real Raingel app
+(am.doit.dohome.strip.service.StripBleManager) showed it actually writes
+to AE01 with WRITE_TYPE_NO_RESPONSE -- confirmed working end-to-end
+against real hardware once corrected.
 """
 
 from __future__ import annotations
@@ -21,8 +21,7 @@ from .base import LightProtocol
 
 class VcBleLightProtocol(LightProtocol):
     name = "vcblelight"
-    write_characteristic = "0000ae10-0000-1000-8000-00805f9b34fb"
-    write_with_response = True
+    write_characteristic = "0000ae01-0000-1000-8000-00805f9b34fb"
     name_hints = (
         "vc-blelight",
     )
