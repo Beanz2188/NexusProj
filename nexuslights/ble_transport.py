@@ -92,6 +92,10 @@ class BleLight:
             await self._client.disconnect()
             self._client = None
 
+    @property
+    def is_connected(self) -> bool:
+        return self._client is not None and self._client.is_connected
+
     async def __aenter__(self) -> "BleLight":
         await self.connect()
         return self
@@ -113,10 +117,21 @@ class BleLight:
         )
 
     async def power_on(self) -> None:
-        await self._write(self.protocol.power_on())
+        if self.protocol.power_off_disconnects:
+            # This chip's power_off cut its BLE radio entirely, so it was
+            # never really "off" at the hardware level while still
+            # reachable -- there's nothing to turn back on beyond
+            # restoring brightness (set_rgb calls after this will restore
+            # the actual color).
+            await self._write(self.protocol.set_brightness(100))
+        else:
+            await self._write(self.protocol.power_on())
 
     async def power_off(self) -> None:
-        await self._write(self.protocol.power_off())
+        if self.protocol.power_off_disconnects:
+            await self._write(self.protocol.set_brightness(0))
+        else:
+            await self._write(self.protocol.power_off())
 
     async def set_rgb(self, r: int, g: int, b: int) -> None:
         await self._write(self.protocol.set_rgb(r, g, b))

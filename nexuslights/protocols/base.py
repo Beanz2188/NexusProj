@@ -31,6 +31,13 @@ class LightProtocol(ABC):
     #: response) rather than the default "Write Command" (fire-and-forget).
     write_with_response: bool = False
 
+    #: Whether this chipset's hardware power_off command cuts its BLE
+    #: radio entirely rather than just switching the LEDs off, making it
+    #: unreachable until physically power-cycled. Callers should prefer
+    #: dimming to the dimmest supported brightness over calling
+    #: power_off() for protocols where this is True.
+    power_off_disconnects: bool = False
+
     #: Substrings of BLE advertised device names known to use this protocol.
     #: Used by discovery to suggest a protocol; not authoritative.
     name_hints: tuple[str, ...] = ()
