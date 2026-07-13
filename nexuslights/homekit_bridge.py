@@ -18,17 +18,36 @@ from __future__ import annotations
 
 import asyncio
 import colorsys
+import hashlib
 import logging
 import threading
 
 from pyhap.accessory import Accessory, Bridge
 from pyhap.accessory_driver import AccessoryDriver
-from pyhap.const import CATEGORY_LIGHTBULB
+from pyhap.const import CATEGORY_LIGHTBULB, CATEGORY_SWITCH
 
+from . import ambilight
 from .ble_transport import BleLight
 from .config import load as load_config
 
 logger = logging.getLogger(__name__)
+
+
+def _stable_aid(bridge: Bridge, identifier: str) -> int:
+    """Derive a HomeKit accessory ID that depends only on `identifier`
+    (e.g. a light's BLE address), never on what other accessories exist
+    or the order they're added in. Sorting config.lights by address
+    before assigning AIDs (the previous approach) is only stable for a
+    *fixed* set of lights -- adding a new light with an alphabetically
+    earlier address shifts every existing light's position in that sort,
+    and therefore its AID, desyncing Home's already-learned accessory
+    mapping for lights that were never touched. A hash of the identifier
+    itself can't shift like that."""
+    digest = int(hashlib.sha256(identifier.encode()).hexdigest(), 16)
+    aid = digest % 1_000_000 + 2  # 0 is invalid, 1 is the bridge itself
+    while aid == 7 or aid in bridge.accessories:  # pyhap: "AID=7 gets unsupported. See issue #61"
+        aid += 1
+    return aid
 
 
 class _BleLoop:
@@ -48,6 +67,23 @@ class _BleLoop:
         # otherwise-successful reconnects.
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
         return future.result(timeout=timeout)
+
+    def create_task(self, coro):
+        """Schedule a long-running coroutine without waiting for it to
+        finish. Returns the real asyncio.Task (not a wrapping
+        concurrent.futures.Future) so it can actually be cancelled later:
+        Future.cancel() from run_coroutine_threadsafe only works while the
+        coroutine hasn't started running yet, which for a loop that starts
+        immediately is never true by the time anyone tries to stop it."""
+
+        async def _spawn():
+            return self._loop.create_task(coro)
+
+        future = asyncio.run_coroutine_threadsafe(_spawn(), self._loop)
+        return future.result(timeout=5.0)
+
+    def cancel_task(self, task) -> None:
+        self._loop.call_soon_threadsafe(task.cancel)
 
 
 class RgbLightAccessory(Accessory):
@@ -112,20 +148,79 @@ class RgbLightAccessory(Accessory):
         await self.ble_light.disconnect()
 
 
-def build_bridge(driver: AccessoryDriver) -> Bridge:
+class AmbilightSwitch(Accessory):
+    """A HomeKit Switch that toggles ambilight mode for every light on the
+    bridge. Runs in the same process (and reuses the same already-open BLE
+    connections) as the Lightbulb accessories, rather than as a separate
+    nexus-lights process, since two processes both holding a connection to
+    the same light isn't possible over BLE."""
+
+    category = CATEGORY_SWITCH
+
+    def __init__(
+        self,
+        driver: AccessoryDriver,
+        lights: list[BleLight],
+        ble_loop: _BleLoop,
+        camera_index: int = 0,
+        fps: float = 5.0,
+        saturation_boost: float = 1.6,
+    ):
+        super().__init__(driver, "TV Ambilight")
+        self.lights = lights
+        self.ble_loop = ble_loop
+        self.camera_index = camera_index
+        self.fps = fps
+        self.saturation_boost = saturation_boost
+        self._task = None
+
+        service = self.add_preload_service("Switch")
+        self.char_on = service.configure_char("On", setter_callback=self._set_on)
+
+    def _set_on(self, value: bool) -> None:
+        if value:
+            if self._task is not None and not self._task.done():
+                return
+            self._task = self.ble_loop.create_task(
+                ambilight.loop(
+                    self.lights,
+                    camera_index=self.camera_index,
+                    fps=self.fps,
+                    saturation_boost=self.saturation_boost,
+                )
+            )
+            self._task.add_done_callback(self._on_task_done)
+        else:
+            if self._task is not None:
+                self.ble_loop.cancel_task(self._task)
+                self._task = None
+
+    def _on_task_done(self, task) -> None:
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error("Ambilight loop stopped unexpectedly: %s", exc)
+            self.char_on.set_value(False)
+
+    async def stop(self) -> None:
+        if self._task is not None:
+            self.ble_loop.cancel_task(self._task)
+
+
+def build_bridge(
+    driver: AccessoryDriver,
+    ambilight_camera: int = 0,
+    ambilight_fps: float = 5.0,
+    ambilight_saturation_boost: float = 1.6,
+) -> Bridge:
     config = load_config()
     if not config.lights:
         raise RuntimeError("No lights configured. Run 'nexus-lights scan' and 'nexus-lights add' first.")
 
     ble_loop = _BleLoop()
     bridge = Bridge(driver, "NexusLights")
-    # HAP-python auto-assigns each accessory's AID by the order add_accessory()
-    # is called, and HomeKit pairings cache AID per accessory. Config.upsert()
-    # re-appends an entry when it's updated, which reorders config.lights and
-    # would otherwise silently reassign AIDs -- breaking existing HomeKit
-    # pairings for lights whose config hasn't even changed. Iterating in a
-    # stable order (by address, which never changes for a given light) keeps
-    # AID assignment consistent across config edits.
+    ble_lights: list[BleLight] = []
     for light_cfg in sorted(config.lights, key=lambda l: l.address):
         ble_light = BleLight(light_cfg.address, light_cfg.protocol)
         try:
@@ -135,12 +230,39 @@ def build_bridge(driver: AccessoryDriver) -> Bridge:
             # whole bridge down. _write() connects on demand, so this light
             # will just reconnect lazily on its first real command.
             logger.warning("Could not connect to %r at startup; will retry on first command", light_cfg.name)
-        bridge.add_accessory(RgbLightAccessory(driver, light_cfg.name, ble_light, ble_loop))
+        ble_lights.append(ble_light)
+        accessory = RgbLightAccessory(driver, light_cfg.name, ble_light, ble_loop)
+        accessory.aid = _stable_aid(bridge, light_cfg.address)
+        bridge.add_accessory(accessory)
+
+    ambilight_switch = AmbilightSwitch(
+        driver,
+        ble_lights,
+        ble_loop,
+        camera_index=ambilight_camera,
+        fps=ambilight_fps,
+        saturation_boost=ambilight_saturation_boost,
+    )
+    ambilight_switch.aid = _stable_aid(bridge, "__ambilight_switch__")
+    bridge.add_accessory(ambilight_switch)
     return bridge
 
 
-def run_bridge(port: int = 51826, persist_file: str = "nexuslights_homekit.state") -> None:
+def run_bridge(
+    port: int = 51826,
+    persist_file: str = "nexuslights_homekit.state",
+    ambilight_camera: int = 0,
+    ambilight_fps: float = 5.0,
+    ambilight_saturation_boost: float = 1.6,
+) -> None:
     driver = AccessoryDriver(port=port, persist_file=persist_file)
-    driver.add_accessory(accessory=build_bridge(driver))
+    driver.add_accessory(
+        accessory=build_bridge(
+            driver,
+            ambilight_camera=ambilight_camera,
+            ambilight_fps=ambilight_fps,
+            ambilight_saturation_boost=ambilight_saturation_boost,
+        )
+    )
     logger.info("Starting HomeKit bridge on port %s (state file: %s)", port, persist_file)
     driver.start()
