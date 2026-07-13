@@ -52,3 +52,12 @@ class LedNetWFProtocol(LightProtocol):
         return _frame(
             bytes([0x3B, 0xA1, hue_byte, sat_byte, val_byte, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
         )
+
+    def set_effect(self, effect_id: int, speed: int = 50) -> bytes:
+        # Different frame shape than power/color: shorter payload, no
+        # checksum byte, per community-documented real captured traffic
+        # (see EFFECTS_RESEARCH.md) -- not yet confirmed against this
+        # project's own hardware.
+        return bytes(
+            [0x00, 0x00, 0x80, 0x00, 0x00, 0x04, 0x05, 0x0B, 0x38, self._clamp(effect_id, 1, 255), self._clamp(speed, 0, 100), 0x64]
+        )
