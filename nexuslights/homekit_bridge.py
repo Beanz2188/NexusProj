@@ -122,6 +122,16 @@ class RgbLightAccessory(Accessory):
                 return
             r, g, b = colorsys.hsv_to_rgb(hue / 360.0, saturation / 100.0, brightness / 100.0)
             await self.ble_light.set_rgb(round(r * 255), round(g * 255), round(b * 255))
+            if not self.ble_light.protocol.color_command_includes_brightness:
+                # This protocol (e.g. mrstar) keeps brightness as
+                # independent device state, separate from the color
+                # command -- moving only the color wheel would otherwise
+                # leave the light at whatever brightness it was last set
+                # to, decoupled from what Home is showing. Note this is
+                # deliberately not a blanket "does set_brightness() exist"
+                # check: elkbledom implements it too, but for a separate
+                # white/CW channel, not as an alternate brightness scaler.
+                await self.ble_light.set_brightness(round(brightness))
 
         self.ble_loop.run(_send())
 

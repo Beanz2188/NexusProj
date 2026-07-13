@@ -38,6 +38,17 @@ class LightProtocol(ABC):
     #: power_off() for protocols where this is True.
     power_off_disconnects: bool = False
 
+    #: Whether set_rgb()'s output already scales with brightness (most
+    #: protocols bake brightness into the RGB values themselves), so a
+    #: caller pushing hue/saturation/brightness together only needs to
+    #: call set_rgb(). False means color and brightness are independent
+    #: device state -- set_rgb() alone won't change brightness, so
+    #: callers need to also call set_brightness() to keep them in sync.
+    #: (Not the same as whether set_brightness() is *implemented* --
+    #: e.g. elkbledom implements it for a separate white/CW channel, not
+    #: as an alternate way to scale the RGB color.)
+    color_command_includes_brightness: bool = True
+
     #: Substrings of BLE advertised device names known to use this protocol.
     #: Used by discovery to suggest a protocol; not authoritative.
     name_hints: tuple[str, ...] = ()

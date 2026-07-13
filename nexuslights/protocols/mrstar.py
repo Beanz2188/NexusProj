@@ -31,6 +31,9 @@ class MrStarProtocol(LightProtocol):
     # until physically power-cycled. BleLight prefers dimming to the
     # minimum brightness over calling power_off() when this is set.
     power_off_disconnects = True
+    # set_rgb() only sends Hue/Saturation (see module docstring) -- it
+    # never touches the device's brightness, which is independent state.
+    color_command_includes_brightness = False
 
     def power_on(self) -> bytes:
         return bytes([0xBC, 0x01, 0x01, 0x01, 0x55])
@@ -45,10 +48,20 @@ class MrStarProtocol(LightProtocol):
         return bytes([0xBC, 0x04, 0x06, hue // 256, hue % 256, sat // 256, sat % 256, 0x00, 0x00, 0x55])
 
     def set_brightness(self, percent: int) -> bytes:
-        # The stock app's UI clamps its slider to a minimum of 3, but
-        # that's an app-layer choice, not a hardware limit: the device
-        # accepts 0 directly and goes fully dark while staying connected
-        # (confirmed on real hardware) -- useful since a real power_off()
-        # on this chip cuts its BLE radio instead of just the LEDs.
-        percent = self._clamp(percent, 0, 100)
-        return bytes([0xBC, 0x05, 0x06, percent // 256, percent % 256, 0x00, 0x00, 0x00, 0x00, 0x55])
+        # The device's actual brightness scale is 0-1000, not 0-100 --
+        # confirmed from a real HCI capture (the app's SeekBar has a max
+        # of 1000, not the usual Android default of 100, which is what
+        # the decompiled source alone made it easy to assume). Sending a
+        # 0-100 value directly on the wire was silently interpreted as
+        # out of 1000, so "full brightness" was actually landing at 10%
+        # -- keep this method's public contract at 0-100 for consistency
+        # with every other protocol here, and scale internally.
+        #
+        # The stock app's UI clamps its slider to a minimum of 3 (i.e.
+        # 0.3%, not 3% as previously assumed) -- an app-layer choice, not
+        # a hardware limit: the device accepts a true 0 directly and goes
+        # fully dark while staying connected (confirmed on real hardware)
+        # -- useful since a real power_off() on this chip cuts its BLE
+        # radio instead of just the LEDs.
+        value = round(self._clamp(percent, 0, 100) * 10)
+        return bytes([0xBC, 0x05, 0x06, value // 256, value % 256, 0x00, 0x00, 0x00, 0x00, 0x55])
