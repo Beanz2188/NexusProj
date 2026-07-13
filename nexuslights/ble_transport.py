@@ -117,15 +117,15 @@ class BleLight:
         )
 
     async def power_on(self) -> None:
+        # Only power_off is special-cased below: on real hardware, sending
+        # this chip's actual power_on byte never disconnects it, only
+        # power_off does -- so there's no reason to avoid it here. But the
+        # "off" workaround leaves brightness at 0, which power_on's own
+        # byte doesn't reset (brightness is separate device state), so
+        # restore it explicitly for protocols using that workaround.
+        await self._write(self.protocol.power_on())
         if self.protocol.power_off_disconnects:
-            # This chip's power_off cut its BLE radio entirely, so it was
-            # never really "off" at the hardware level while still
-            # reachable -- there's nothing to turn back on beyond
-            # restoring brightness (set_rgb calls after this will restore
-            # the actual color).
             await self._write(self.protocol.set_brightness(100))
-        else:
-            await self._write(self.protocol.power_on())
 
     async def power_off(self) -> None:
         if self.protocol.power_off_disconnects:
