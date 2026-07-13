@@ -10,6 +10,7 @@
     nexus-lights all-on / all-off
     nexus-lights raw AA:BB:CC:DD:EE:FF triones 56ff0000000ff0aa   # protocol tuning
     nexus-lights bridge                        # expose lights to Apple HomeKit
+    nexus-lights ambilight                     # match lights to a camera feed of the TV
 """
 
 from __future__ import annotations
@@ -130,10 +131,39 @@ def raw(address: str, protocol: str, hex_payload: str) -> None:
 
 
 @main.command()
+@click.option("--camera", default=0, help="OpenCV camera index (0 is usually the built-in webcam).")
+@click.option("--fps", default=5.0, help="Target updates per second.")
+@click.option("--saturation-boost", default=1.6, help="Multiplier applied to the averaged frame's saturation.")
+def ambilight(camera: int, fps: float, saturation_boost: float) -> None:
+    """Match every configured light's color to a camera feed pointed at the TV."""
+    try:
+        from .ambilight import run as run_ambilight
+    except ModuleNotFoundError as exc:
+        raise click.ClickException(
+            "opencv-python is required for ambilight mode. Install it with:\n"
+            "    pip install opencv-python numpy"
+        ) from exc
+
+    _run(run_ambilight(camera_index=camera, fps=fps, saturation_boost=saturation_boost))
+
+
+@main.command()
 @click.option("--port", default=51826, help="HomeKit accessory server port.")
 @click.option("--persist-file", default="nexuslights_homekit.state", help="HAP-python pairing state file.")
-def bridge(port: int, persist_file: str) -> None:
-    """Start a HomeKit bridge exposing every configured light to Apple Home."""
+@click.option("--ambilight-camera", default=0, help="OpenCV camera index for the 'TV Ambilight' switch.")
+@click.option("--ambilight-fps", default=5.0, help="Target updates per second for ambilight mode.")
+@click.option(
+    "--ambilight-saturation-boost", default=1.6, help="Saturation multiplier applied in ambilight mode."
+)
+def bridge(
+    port: int,
+    persist_file: str,
+    ambilight_camera: int,
+    ambilight_fps: float,
+    ambilight_saturation_boost: float,
+) -> None:
+    """Start a HomeKit bridge exposing every configured light (plus a 'TV
+    Ambilight' switch) to Apple Home."""
     try:
         from .homekit_bridge import run_bridge
     except ModuleNotFoundError as exc:
@@ -142,7 +172,13 @@ def bridge(port: int, persist_file: str) -> None:
             "    pip install HAP-python"
         ) from exc
 
-    run_bridge(port=port, persist_file=persist_file)
+    run_bridge(
+        port=port,
+        persist_file=persist_file,
+        ambilight_camera=ambilight_camera,
+        ambilight_fps=ambilight_fps,
+        ambilight_saturation_boost=ambilight_saturation_boost,
+    )
 
 
 if __name__ == "__main__":
