@@ -34,6 +34,12 @@ class MrStarProtocol(LightProtocol):
     # set_rgb() only sends Hue/Saturation (see module docstring) -- it
     # never touches the device's brightness, which is independent state.
     color_command_includes_brightness = False
+    # Every write in real captured traffic from the app used BLE "Write
+    # Request" (ATT opcode 0x12, waits for an ack) -- confirmed across
+    # multiple fresh captures. Writing without a response (the default
+    # for every other protocol here) let color/brightness changes get
+    # silently accepted without actually being applied by the device.
+    write_with_response = True
 
     def power_on(self) -> bytes:
         return bytes([0xBC, 0x01, 0x01, 0x01, 0x55])
