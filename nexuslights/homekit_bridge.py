@@ -25,7 +25,7 @@ import time
 
 from pyhap.accessory import Accessory, Bridge
 from pyhap.accessory_driver import AccessoryDriver
-from pyhap.const import CATEGORY_LIGHTBULB, CATEGORY_SWITCH
+from pyhap.const import CATEGORY_LIGHTBULB, CATEGORY_SENSOR, CATEGORY_SWITCH
 
 from . import ambilight
 from . import ble_transport
@@ -125,6 +125,7 @@ class _BleLoop:
 
 class RgbLightAccessory(Accessory):
     category = CATEGORY_LIGHTBULB
+    supports_color = True
 
     def __init__(self, driver: AccessoryDriver, display_name: str, ble_light: BleLight | RemoteLight, ble_loop: _BleLoop):
         super().__init__(driver, display_name)
@@ -213,6 +214,25 @@ class RgbLightAccessory(Accessory):
         self._saturation = value
         self._push_rgb()
 
+    def panel_set(self, on=None, brightness=None, hue=None, saturation=None) -> None:
+        """Apply a change from the wall panel (panel_api.py) the way a Home
+        app write would: update the characteristics, which pushes the new
+        values to every paired Home app, then drive the light once."""
+        if hue is not None:
+            self._hue = float(hue)
+            self.char_hue.set_value(self._hue)
+        if saturation is not None:
+            self._saturation = float(saturation)
+            self.char_saturation.set_value(self._saturation)
+        if brightness is not None:
+            self._brightness = int(brightness)
+            self.char_brightness.set_value(self._brightness)
+        if on is not None and bool(on) != bool(self.char_on.value):
+            self.char_on.set_value(bool(on))
+            self._set_on(bool(on))  # power, plus the current color when turning on
+        elif (hue, saturation, brightness) != (None, None, None) and self.char_on.value:
+            self._push_rgb()
+
     async def stop(self) -> None:
         await self.ble_light.disconnect()
 
@@ -224,6 +244,7 @@ class DimmableLightAccessory(Accessory):
     set_brightness() (e.g. a flux_led WifiLight)."""
 
     category = CATEGORY_LIGHTBULB
+    supports_color = False
 
     def __init__(self, driver: AccessoryDriver, display_name: str, light, ble_loop: _BleLoop):
         super().__init__(driver, display_name)
@@ -251,8 +272,50 @@ class DimmableLightAccessory(Accessory):
         else:
             self.ble_loop.run(self.light.set_brightness(value), timeout=20.0)
 
+    def panel_set(self, on=None, brightness=None, **_color) -> None:
+        """Wall-panel counterpart of a Home write (see RgbLightAccessory.panel_set).
+        Color is ignored: this light has none."""
+        if brightness is not None:
+            self._brightness = int(brightness)
+            self.char_brightness.set_value(self._brightness)
+        if on is not None and bool(on) != bool(self.char_on.value):
+            self.char_on.set_value(bool(on))
+            self._set_on(bool(on))
+        elif brightness is not None and self.char_on.value:
+            self._set_brightness(self._brightness)
+
     async def stop(self) -> None:
         await self.light.disconnect()
+
+
+class PanelMotionSensor(Accessory):
+    """The wall-panel tablet's presence detection (front camera / knock),
+    reported over panel_api.py, so Home automations can use it."""
+
+    category = CATEGORY_SENSOR
+
+    def __init__(self, driver: AccessoryDriver, display_name: str = "Wall Panel Motion"):
+        super().__init__(driver, display_name)
+        service = self.add_preload_service("MotionSensor")
+        self.char_detected = service.configure_char("MotionDetected")
+
+    def set_motion(self, detected: bool) -> None:
+        self.char_detected.set_value(bool(detected))
+
+
+class PanelLightSensor(Accessory):
+    """The wall-panel tablet's ambient light sensor, in lux."""
+
+    category = CATEGORY_SENSOR
+
+    def __init__(self, driver: AccessoryDriver, display_name: str = "Wall Panel Light Level"):
+        super().__init__(driver, display_name)
+        service = self.add_preload_service("LightSensor")
+        self.char_lux = service.configure_char("CurrentAmbientLightLevel")
+
+    def set_lux(self, lux: float) -> None:
+        # HomeKit's valid range is 0.0001..100000 lux.
+        self.char_lux.set_value(min(max(lux, 0.0001), 100000.0))
 
 
 class AmbilightSwitch(Accessory):
@@ -443,6 +506,7 @@ def build_bridge(
     disconnect_after_write: bool = False,
     relay_url: str | None = None,
     relay_rssi_threshold: float = -75.0,
+    panel_sensors: bool = False,
 ) -> tuple[Bridge, dashboard.DashboardState, "_BleLoop"]:
     config = load_config()
     if not config.lights:
@@ -472,6 +536,7 @@ def build_bridge(
                     name=light_cfg.name,
                     protocol=light_cfg.protocol,
                     address=light_cfg.address,
+                    accessory=accessory,
                     is_ble=False,
                     light=wifi_light,
                 )
@@ -539,6 +604,7 @@ def build_bridge(
                 address=light_cfg.address,
                 is_ble=True,
                 light=light,
+                accessory=accessory,
             )
         )
 
@@ -597,6 +663,17 @@ def build_bridge(
         dashboard_state.music_art_sync_switch = music_art_sync_switch
     else:
         logger.info("No Apple TV paired; skipping Music Art Sync switch (run 'nexus-lights pair-appletv' to add it)")
+
+    if panel_sensors:
+        # Fed by the wall-panel tablet over panel_api.py's POST /api/panel.
+        motion = PanelMotionSensor(driver)
+        motion.aid = _stable_aid(bridge, "__panel_motion__")
+        bridge.add_accessory(motion)
+        lux = PanelLightSensor(driver)
+        lux.aid = _stable_aid(bridge, "__panel_lux__")
+        bridge.add_accessory(lux)
+        dashboard_state.panel_motion = motion
+        dashboard_state.panel_lux = lux
 
     return bridge, dashboard_state, ble_loop
 
@@ -666,6 +743,8 @@ def run_bridge(
     disconnect_after_write: bool = False,
     relay_url: str | None = None,
     relay_rssi_threshold: float = -75.0,
+    panel_api_enabled: bool = True,
+    panel_sensors: bool = False,
 ) -> None:
     driver = AccessoryDriver(port=port, persist_file=persist_file)
     bridge, dashboard_state, ble_loop = build_bridge(
@@ -678,8 +757,15 @@ def run_bridge(
         disconnect_after_write=disconnect_after_write,
         relay_url=relay_url,
         relay_rssi_threshold=relay_rssi_threshold,
+        panel_sensors=panel_sensors,
     )
     driver.add_accessory(accessory=bridge)
+
+    if dashboard_port is not None and panel_api_enabled:
+        from . import panel_api
+
+        dashboard_state.api_token = panel_api.load_or_create_token()
+        logger.info("Wall-panel API enabled on port %s (token: %s)", dashboard_port, panel_api.TOKEN_PATH)
 
     if dashboard_port is not None:
         try:

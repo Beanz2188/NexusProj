@@ -28,6 +28,10 @@ class LightStatus:
     address: str
     is_ble: bool
     light: object  # BleLight | MerossLight, duck-typed on .is_connected
+    #: The HomeKit accessory driving this light, so the wall panel API can
+    #: control it the same way Home does. None for lights Home controls
+    #: directly (the Meross light).
+    accessory: object | None = None
 
 
 @dataclass
@@ -37,6 +41,11 @@ class DashboardState:
     music_art_sync_switch: object | None = None
     rainbow_switch: object | None = None
     started_at: float = field(default_factory=time.monotonic)
+    #: Bearer token for the wall-panel /api routes; None disables them.
+    api_token: str | None = None
+    #: Optional "Wall Panel" motion / light-level accessories fed by the tablet.
+    panel_motion: object | None = None
+    panel_lux: object | None = None
 
 
 def _require_aiohttp():
@@ -147,6 +156,9 @@ def _build_app(state: DashboardState):
     app = web.Application()
     app.router.add_get("/", index_handler)
     app.router.add_get("/status", status_handler)
+    from . import panel_api
+
+    panel_api.register(app, state, web)
     return app
 
 

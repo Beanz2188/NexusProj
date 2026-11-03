@@ -323,6 +323,18 @@ def pair_meross() -> None:
     type=float,
     help="Signal strength (dBm) below which a light is routed through --relay-url instead of controlled directly.",
 )
+@click.option(
+    "--panel-sensors",
+    is_flag=True,
+    default=False,
+    help="Add 'Wall Panel Motion' and 'Wall Panel Light Level' sensors to Apple Home, fed by the wall-panel tablet.",
+)
+@click.option(
+    "--no-panel-api",
+    is_flag=True,
+    default=False,
+    help="Turn off the wall-panel control API (/api on the dashboard port).",
+)
 def bridge(
     port: int,
     persist_file: str,
@@ -335,6 +347,8 @@ def bridge(
     disconnect_after_write: bool,
     relay_url: str | None,
     relay_rssi_threshold: float,
+    panel_sensors: bool,
+    no_panel_api: bool,
 ) -> None:
     """Start a HomeKit bridge exposing every configured light (plus a 'TV
     Ambilight' switch, and a 'Music Art Sync' switch if an Apple TV is
@@ -359,6 +373,8 @@ def bridge(
         disconnect_after_write=disconnect_after_write,
         relay_url=relay_url,
         relay_rssi_threshold=relay_rssi_threshold,
+        panel_api_enabled=not no_panel_api,
+        panel_sensors=panel_sensors,
     )
 
 
