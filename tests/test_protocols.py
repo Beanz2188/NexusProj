@@ -52,3 +52,27 @@ def test_guess_protocol_matches_name_hints():
     assert guess_protocol("ELK-BLEDOM") == "elkbledom"
     assert guess_protocol("Some Random Device") is None
     assert guess_protocol(None) is None
+
+
+def test_lednetwf_iotwf_power_frames_match_hardware_capture():
+    # Exact bytes confirmed against real "IOTWF06B" hardware: the device
+    # flips its reported power byte only in response to these 0x71 frames,
+    # not the classic lednetwf 0x3B ones. Seq counter increments per call.
+    from nexuslights.protocols.lednetwf_iotwf import LedNetWFIotwfProtocol
+    proto = LedNetWFIotwfProtocol()
+    assert proto.power_on() == bytes.fromhex("000180000004050b71230fa3")
+    assert proto.power_off() == bytes.fromhex("000280000004050b71240fa4")
+
+
+def test_lednetwf_iotwf_set_rgb_red():
+    from nexuslights.protocols.lednetwf_iotwf import LedNetWFIotwfProtocol
+    proto = LedNetWFIotwfProtocol()
+    # red = hue 0, sat 100, val 100; seq is 1 on first call
+    assert proto.set_rgb(255, 0, 0) == bytes.fromhex("00018000000d0e0b3ba100646400000000000000a4")
+
+
+def test_lednetwf_iotwf_registered_and_guessable():
+    from nexuslights.protocols import get_protocol, guess_protocol
+    from nexuslights.protocols.lednetwf_iotwf import LedNetWFIotwfProtocol
+    assert isinstance(get_protocol("lednetwf-iotwf"), LedNetWFIotwfProtocol)
+    assert guess_protocol("IOTWF06B") == "lednetwf-iotwf"

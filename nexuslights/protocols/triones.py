@@ -26,7 +26,6 @@ class TrionesProtocol(LightProtocol):
         "ledble",
         "led-ble",
         "melk",
-        "lednetwf",
         "happy lighting",
         "qhm",
     )

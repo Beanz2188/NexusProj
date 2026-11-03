@@ -22,6 +22,33 @@ class LightProtocol(ABC):
     #: BLE GATT characteristic (UUID string) that commands are written to.
     write_characteristic: str
 
+    #: Optional notify characteristic that must be subscribed to before the
+    #: device will accept writes (some chipsets otherwise silently ignore
+    #: every command). Most protocols don't need this.
+    notify_characteristic: str | None = None
+
+    #: Whether writes should be sent as a BLE "Write Request" (waits for a
+    #: response) rather than the default "Write Command" (fire-and-forget).
+    write_with_response: bool = False
+
+    #: Whether this chipset's hardware power_off command cuts its BLE
+    #: radio entirely rather than just switching the LEDs off, making it
+    #: unreachable until physically power-cycled. Callers should prefer
+    #: dimming to the dimmest supported brightness over calling
+    #: power_off() for protocols where this is True.
+    power_off_disconnects: bool = False
+
+    #: Whether set_rgb()'s output already scales with brightness (most
+    #: protocols bake brightness into the RGB values themselves), so a
+    #: caller pushing hue/saturation/brightness together only needs to
+    #: call set_rgb(). False means color and brightness are independent
+    #: device state -- set_rgb() alone won't change brightness, so
+    #: callers need to also call set_brightness() to keep them in sync.
+    #: (Not the same as whether set_brightness() is *implemented* --
+    #: e.g. elkbledom implements it for a separate white/CW channel, not
+    #: as an alternate way to scale the RGB color.)
+    color_command_includes_brightness: bool = True
+
     #: Substrings of BLE advertised device names known to use this protocol.
     #: Used by discovery to suggest a protocol; not authoritative.
     name_hints: tuple[str, ...] = ()
