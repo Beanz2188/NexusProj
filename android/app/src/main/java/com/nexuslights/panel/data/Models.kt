@@ -10,8 +10,16 @@ data class LightConfig(
     val protocol: String,
     val room: String = "Home",
     val icon: String = LightIcon.STRIP.id,
+    /**
+     * Connect only to send a command, then disconnect (nexuslights
+     * `on_demand`). For Wi-Fi-first controllers that drop idle BLE links and
+     * flash when reconnected.
+     */
+    val onDemand: Boolean = false,
 ) {
-    val protocolImpl: LightProtocol get() = LightProtocol.byId(protocol)
+    /** Static facts about the protocol (name, capabilities); not for sending. */
+    val protocolInfo: LightProtocol get() = LightProtocol.info(protocol) ?: LightProtocol.ALL.first()
+    val supportsColor: Boolean get() = protocolInfo.supportsColor
 }
 
 /**
@@ -33,7 +41,11 @@ data class LightState(
     fun displayRgb(): Triple<Int, Int, Int> = ColorMath.hsvToRgb(hue, saturation, 1f)
 }
 
-enum class LinkStatus { DISCONNECTED, CONNECTING, CONNECTED, FAILED }
+enum class LinkStatus {
+    DISCONNECTED, CONNECTING, CONNECTED, FAILED,
+    /** On-demand light, not connected right now, which is its normal resting state. */
+    IDLE,
+}
 
 data class Light(
     val config: LightConfig,

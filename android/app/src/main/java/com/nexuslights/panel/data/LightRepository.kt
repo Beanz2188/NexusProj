@@ -2,7 +2,10 @@ package com.nexuslights.panel.data
 
 import android.content.Context
 import android.util.Log
-import com.nexuslights.panel.ble.BleController
+import com.nexuslights.panel.ble.Cmd
+import com.nexuslights.panel.ble.LightLinks
+import com.nexuslights.panel.protocol.LightProtocol
+import com.nexuslights.panel.system.Backup
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -25,7 +28,7 @@ import java.util.concurrent.CopyOnWriteArrayList
  * (touch UI, HomeKit, scenes, motion automations) goes through here, so all
  * of them stay in sync and every change is persisted + sent over BLE.
  */
-class LightRepository(context: Context, private val ble: BleController) {
+class LightRepository(private val context: Context, private val ble: LightLinks, private val wifi: LightLinks) {
 
     enum class Source { UI, HOMEKIT, SCENE, AUTOMATION }
 
@@ -43,13 +46,32 @@ class LightRepository(context: Context, private val ble: BleController) {
     val configs: StateFlow<List<LightConfig>> = _configs.asStateFlow()
     val states: StateFlow<Map<String, LightState>> = _states.asStateFlow()
 
-    val lights: StateFlow<List<Light>> = combine(_configs, _states, ble.links) { cfgs, st, links ->
-        cfgs.map { Light(it, st[it.address] ?: LightState(), links[it.address] ?: LinkStatus.DISCONNECTED) }
+    val lights: StateFlow<List<Light>> = combine(_configs, _states, ble.links, wifi.links) { cfgs, st, bl, wl ->
+        cfgs.map { Light(it, st[it.address] ?: LightState(), bl[it.address] ?: wl[it.address] ?: LinkStatus.DISCONNECTED) }
     }.stateIn(scope, SharingStarted.Eagerly, emptyList())
+
+    /** One protocol instance per light: some keep state (LEDnetWF IOTWF's sequence counter). */
+    private val protocols = java.util.concurrent.ConcurrentHashMap<String, LightProtocol>()
+
+    private fun protoFor(cfg: LightConfig): LightProtocol {
+        val existing = protocols[cfg.address]
+        if (existing != null && existing.id == cfg.protocol) return existing
+        return LightProtocol.create(cfg.protocol).also { protocols[cfg.address] = it }
+    }
+
+    private fun linksFor(cfg: LightConfig): LightLinks =
+        if (cfg.protocolInfo.transport == LightProtocol.Transport.WIFI) wifi else ble
+
+    private fun publishDevices() {
+        ble.setKnownDevices(_configs.value)
+        wifi.setKnownDevices(_configs.value)
+    }
+
+    fun retryAll() { ble.retryAll(); wifi.retryAll() }
 
     init {
         load()
-        ble.setKnownDevices(_configs.value)
+        publishDevices()
     }
 
     fun addListener(l: ChangeListener) = listeners.add(l)
@@ -69,7 +91,7 @@ class LightRepository(context: Context, private val ble: BleController) {
         }
         _states.update { if (it.containsKey(addr)) it else it + (addr to LightState()) }
         save()
-        ble.setKnownDevices(_configs.value)
+        publishDevices()
         listeners.forEach { it.onChanged(addr, null, state(addr)) }
     }
 
@@ -78,8 +100,9 @@ class LightRepository(context: Context, private val ble: BleController) {
         val old = _states.value[address]
         _configs.update { list -> list.filterNot { it.address == address } }
         _states.update { it - address }
+        protocols.remove(address)
         save()
-        ble.setKnownDevices(_configs.value)
+        publishDevices()
         listeners.forEach { it.onChanged(address, old, null) }
     }
 
@@ -116,14 +139,13 @@ class LightRepository(context: Context, private val ble: BleController) {
     fun identify(address: String) {
         val cfg = config(address) ?: return
         scope.launch {
-            val p = cfg.protocolImpl
+            val flash = LightState(on = true, brightness = 100, hue = 0f, saturation = 0f)
+            val dark = LightState(on = false)
             repeat(2) {
-                ble.send(address, listOf(p.powerOn(), p.setRgb(255, 255, 255)), coalesce = false)
-                delay(350)
-                ble.send(address, listOf(p.powerOff()), coalesce = false)
-                delay(350)
+                push(cfg, flash, dark, coalesce = false); delay(400)
+                push(cfg, dark, flash, coalesce = false); delay(400)
             }
-            push(cfg, state(address))
+            push(cfg, state(address), dark, coalesce = false)
         }
     }
 
@@ -152,17 +174,34 @@ class LightRepository(context: Context, private val ble: BleController) {
         listeners.forEach { it.onChanged(address, o, n) }
     }
 
-    private fun push(cfg: LightConfig, s: LightState, old: LightState? = null) {
-        val p = cfg.protocolImpl
-        val frames = mutableListOf<ByteArray>()
+    /**
+     * Turn a state change into frames, following the same per-protocol rules
+     * as the Python bridge:
+     *  - power_off_disconnects (MrStar): "off" is brightness 0, never power_off
+     *  - color_command_includes_brightness: fold brightness into RGB, otherwise
+     *    send the full-value color plus a separate brightness command
+     *  - brightness-only lights (Wi-Fi dimmer): just brightness
+     */
+    private fun push(cfg: LightConfig, s: LightState, old: LightState? = null, coalesce: Boolean = true) {
+        val p = protoFor(cfg)
+        val cmds = mutableListOf<Cmd>()
         if (!s.on) {
-            frames += p.powerOff()
+            val off = if (p.powerOffDisconnects) p.setBrightness(0) else p.powerOff()
+            cmds += Cmd(off ?: p.powerOff(), power = true)
         } else {
-            if (old == null || !old.on) frames += p.powerOn()
-            val (r, g, b) = s.rgb()
-            frames += p.setRgb(r, g, b)
+            if (old == null || !old.on) cmds += Cmd(p.powerOn(), power = true)
+            when {
+                !p.supportsColor -> p.setBrightness(s.brightness)?.let { cmds += Cmd(it) }
+                p.colorIncludesBrightness -> {
+                    val (r, g, b) = s.rgb(); cmds += Cmd(p.setRgb(r, g, b))
+                }
+                else -> {
+                    val (r, g, b) = s.displayRgb(); cmds += Cmd(p.setRgb(r, g, b))
+                    p.setBrightness(s.brightness)?.let { cmds += Cmd(it) }
+                }
+            }
         }
-        ble.send(cfg.address, frames, coalesce = true)
+        linksFor(cfg).send(cfg.address, cmds, coalesce)
     }
 
     // ---- persistence -----------------------------------------------------
@@ -181,17 +220,20 @@ class LightRepository(context: Context, private val ble: BleController) {
             arr.put(
                 JSONObject()
                     .put("address", c.address).put("name", c.name).put("protocol", c.protocol)
-                    .put("room", c.room).put("icon", c.icon)
+                    .put("room", c.room).put("icon", c.icon).put("onDemand", c.onDemand)
                     .put("state", JSONObject().put("on", s.on).put("brightness", s.brightness)
                         .put("hue", s.hue.toDouble()).put("saturation", s.saturation.toDouble()))
             )
         }
+        val text = JSONObject().put("lights", arr).toString(2)
         val tmp = File(file.parentFile, file.name + ".tmp")
-        tmp.writeText(JSONObject().put("lights", arr).toString(2))
+        tmp.writeText(text)
         tmp.renameTo(file)
+        Backup.save(context, file.name, text)
     }
 
     private fun load() {
+        Backup.restoreIfMissing(context, file.name, file)
         if (!file.exists()) return
         runCatching {
             val arr = JSONObject(file.readText()).getJSONArray("lights")
@@ -202,6 +244,7 @@ class LightRepository(context: Context, private val ble: BleController) {
                 val c = LightConfig(
                     o.getString("address"), o.getString("name"), o.getString("protocol"),
                     o.optString("room", "Home"), o.optString("icon", LightIcon.STRIP.id),
+                    o.optBoolean("onDemand", false),
                 )
                 cfgs += c
                 o.optJSONObject("state")?.let { s ->

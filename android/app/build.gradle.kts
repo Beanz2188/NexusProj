@@ -90,7 +90,12 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
 
     // HomeKit Accessory Protocol server (pure Java) -> Apple Home
-    implementation("io.github.hap-java:hap:2.0.7")
+    implementation("io.github.hap-java:hap:2.0.7") {
+        // Both ship the same public-domain djb.Curve25519; keep net.vrallev's copy.
+        exclude(group = "org.zeromq", module = "curve25519-java")
+        // org.glassfish:javax.json already contains the javax.json API classes.
+        exclude(group = "javax.json", module = "javax.json-api")
+    }
     implementation("org.slf4j:slf4j-android:1.7.36")
     // QR code for HomeKit pairing
     implementation("com.google.zxing:core:3.5.3")

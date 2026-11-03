@@ -5,3 +5,7 @@ local.properties
 *.iml
 # release signing key lives outside the repo (see README)
 signing/*.jks
+
+# The prebuilt APK is committed on purpose: the Mac that provisions the
+# tablet has no Android SDK. Re-include it despite the root "dist/" rule.
+!dist/
