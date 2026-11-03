@@ -1,0 +1,9 @@
+<resources>
+    <style name="Theme.NexusPanel" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@android:color/black</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/black</item>
+        <item name="android:windowFullscreen">true</item>
+        <item name="android:windowLayoutInDisplayCutoutMode" tools:targetApi="p" xmlns:tools="http://schemas.android.com/tools">shortEdges</item>
+    </style>
+</resources>

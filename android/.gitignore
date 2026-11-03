@@ -1,0 +1,7 @@
+.gradle/
+build/
+local.properties
+.idea/
+*.iml
+# release signing key lives outside the repo (see README)
+signing/*.jks
