@@ -29,11 +29,26 @@ class LightConfig:
     address: str
     name: str
     protocol: str
+    #: Connect only to send a command, then disconnect, instead of holding
+    #: a persistent BLE link. For "WiFi-first" controllers (e.g. Zengge
+    #: "IOTWF" / lednetwf-iotwf) that treat BLE as a short-lived setup
+    #: channel and drop idle connections -- the bridge reconnecting such a
+    #: light every watchdog cycle makes it visibly flash (confirmed on real
+    #: hardware: the kitchen light blinked continuously until set on-demand).
+    on_demand: bool = False
+
+
+@dataclass
+class AppleTVConfig:
+    identifier: str
+    companion_credentials: str
+    airplay_credentials: str
 
 
 @dataclass
 class Config:
     lights: list[LightConfig] = field(default_factory=list)
+    apple_tv: AppleTVConfig | None = None
 
     def get(self, address: str) -> LightConfig | None:
         address = address.lower()
@@ -59,12 +74,16 @@ def load(path: Path = DEFAULT_CONFIG_PATH) -> Config:
     except ModuleNotFoundError:
         raw = json.loads(path.read_text() or "{}")
     lights = [LightConfig(**entry) for entry in raw.get("lights", [])]
-    return Config(lights=lights)
+    apple_tv_raw = raw.get("apple_tv")
+    apple_tv = AppleTVConfig(**apple_tv_raw) if apple_tv_raw else None
+    return Config(lights=lights, apple_tv=apple_tv)
 
 
 def save(config: Config, path: Path = DEFAULT_CONFIG_PATH) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     raw = {"lights": [asdict(light) for light in config.lights]}
+    if config.apple_tv is not None:
+        raw["apple_tv"] = asdict(config.apple_tv)
     try:
         import yaml
 

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from .base import LightProtocol
-from .elkbledom import ElkBledomProtocol
+from .elkbledom import ElkBledomNotifyProtocol, ElkBledomProtocol
 from .lednetwf import LedNetWFProtocol
+from .lednetwf_iotwf import LedNetWFIotwfProtocol
 from .mrstar import MrStarProtocol
 from .triones import TrionesProtocol
 from .vcblelight import VcBleLightProtocol
@@ -11,7 +12,9 @@ from .vcblelight import VcBleLightProtocol
 REGISTRY: dict[str, type[LightProtocol]] = {
     TrionesProtocol.name: TrionesProtocol,
     ElkBledomProtocol.name: ElkBledomProtocol,
+    ElkBledomNotifyProtocol.name: ElkBledomNotifyProtocol,
     LedNetWFProtocol.name: LedNetWFProtocol,
+    LedNetWFIotwfProtocol.name: LedNetWFIotwfProtocol,
     VcBleLightProtocol.name: VcBleLightProtocol,
     MrStarProtocol.name: MrStarProtocol,
 }

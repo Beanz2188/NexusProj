@@ -27,6 +27,7 @@ import time
 
 from .ble_transport import BleLight
 from .config import load as load_config
+from .meross_light import load_configured as load_meross_light
 
 
 def _require_cv2():
@@ -63,7 +64,7 @@ def _average_color(frame, saturation_boost: float) -> tuple[int, int, int]:
     return round(r * 255), round(g * 255), round(b * 255)
 
 
-async def _push(light: BleLight, r: int, g: int, b: int) -> None:
+async def _push(light, r: int, g: int, b: int) -> None:
     try:
         if not light.is_connected:
             # Covers both a light that never connected at startup and one
@@ -76,7 +77,7 @@ async def _push(light: BleLight, r: int, g: int, b: int) -> None:
 
 
 async def loop(
-    lights: list[BleLight],
+    lights: list,
     camera_index: int = 0,
     fps: float = 5.0,
     saturation_boost: float = 1.6,
@@ -115,14 +116,20 @@ async def run(
     if not config.lights:
         raise RuntimeError("No lights configured. Run 'nexus-lights scan' and 'nexus-lights add' first.")
 
-    lights = [BleLight(light_cfg.address, light_cfg.protocol) for light_cfg in config.lights]
+    lights: list = [BleLight(light_cfg.address, light_cfg.protocol) for light_cfg in config.lights]
+    names = [light_cfg.name for light_cfg in config.lights]
+    meross_light = load_meross_light()
+    if meross_light is not None:
+        lights.append(meross_light)
+        names.append("Meross MSL430")
+
     print(f"Connecting to {len(lights)} light(s)...")
-    for light, light_cfg in zip(lights, config.lights):
+    for light, name in zip(lights, names):
         try:
             await light.connect()
-            print(f"  connected: {light_cfg.name}")
+            print(f"  connected: {name}")
         except Exception as exc:
-            print(f"  could not connect to {light_cfg.name!r} ({exc}); will keep retrying in the loop")
+            print(f"  could not connect to {name!r} ({exc}); will keep retrying in the loop")
 
     print("Running -- Ctrl+C to stop.")
     try:

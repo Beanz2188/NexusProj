@@ -17,6 +17,9 @@ dependencies = [
 [project.optional-dependencies]
 homekit = ["HAP-python>=4.9"]
 ambilight = ["opencv-python>=4.8", "numpy>=1.24"]
+musicsync = ["pyatv>=0.14", "opencv-python>=4.8", "numpy>=1.24"]
+meross = ["meross-iot>=0.4"]
+dashboard = ["aiohttp>=3.9"]
 dev = ["pytest>=7.0"]
 
 [project.scripts]
