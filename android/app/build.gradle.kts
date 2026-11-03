@@ -5,9 +5,9 @@ plugins {
 }
 
 // Optional local release key (never committed). Without it the build falls
-// back to the machine's debug key. Because the app is installed as the
-// tablet's device owner, an update must be signed with the SAME key as the
-// installed copy -- otherwise use scripts/reinstall.sh (see android/README.md).
+// back to the machine's debug key. The app is the tablet's device owner, so
+// an update must be signed with the SAME key as the installed copy;
+// scripts/update.sh reinstalls when it isn't (see android/README.md).
 val panelKeystore = rootProject.file("signing/nexuspanel.jks")
 
 android {
@@ -37,8 +37,6 @@ android {
 
     buildTypes {
         release {
-            // Netty/HAP-Java lean on reflection; R8 isn't worth the risk for a
-            // single-device app. APK size is irrelevant here.
             isMinifyEnabled = false
             signingConfig = signingConfigs.findByName("panel") ?: signingConfigs.getByName("debug")
         }
@@ -71,6 +69,10 @@ android {
             )
         }
     }
+    testOptions {
+        // android.util.Log etc. return defaults instead of throwing in JVM tests
+        unitTests.isReturnDefaultValues = true
+    }
     lint {
         checkReleaseBuilds = false
         abortOnError = false
@@ -89,18 +91,10 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
 
-    // HomeKit Accessory Protocol server (pure Java) -> Apple Home
-    implementation("io.github.hap-java:hap:2.0.7") {
-        // Both ship the same public-domain djb.Curve25519; keep net.vrallev's copy.
-        exclude(group = "org.zeromq", module = "curve25519-java")
-        // org.glassfish:javax.json already contains the javax.json API classes.
-        exclude(group = "javax.json", module = "javax.json-api")
-    }
-    implementation("org.slf4j:slf4j-android:1.7.36")
-    // QR code for HomeKit pairing
-    implementation("com.google.zxing:core:3.5.3")
 
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.3")
 
     testImplementation("junit:junit:4.13.2")
+    // real org.json for JVM tests (the android.jar one is a stub)
+    testImplementation("org.json:json:20240303")
 }

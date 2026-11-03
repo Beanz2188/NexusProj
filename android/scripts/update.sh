@@ -4,8 +4,8 @@
 #
 # Same signing key as the installed copy: a normal in-place update.
 # Different key (built on another machine): Android refuses the update, so
-# this removes the old copy and installs fresh. The app restores its Apple
-# Home pairing and lights from /sdcard/NexusPanel/backup, so nothing needs re-pairing.
+# this removes the old copy and installs fresh. That loses the panel's own
+# settings (bridge address, token, rooms/icons): re-run provision.sh after.
 set -euo pipefail
 PKG=com.nexuslights.panel
 ADMIN="$PKG/.kiosk.AdminReceiver"
@@ -21,15 +21,11 @@ if OUT="$(adb install -r -t -g "$APK" 2>&1)"; then
 else
   echo "$OUT"
   if echo "$OUT" | grep -q -E "INSTALL_FAILED_UPDATE_INCOMPATIBLE|signatures do not match"; then
-    echo "Different signing key: reinstalling (pairing + lights come back from the on-device backup)."
-    if [ -z "$(sh_ ls /sdcard/NexusPanel/backup/homekit.json 2>/dev/null)" ]; then
-      echo "WARNING: no /sdcard/NexusPanel/backup/homekit.json on the tablet; Apple Home will need re-pairing." >&2
-    fi
+    echo "Different signing key: reinstalling. Re-run provision.sh --no-strip afterwards to reconnect it to the bridge."
     sh_ dpm remove-active-admin "$ADMIN" || true
     adb uninstall "$PKG" >/dev/null || true
     adb install -t -g "$APK"
     sh_ dpm set-device-owner "$ADMIN"
-    sh_ pm grant "$PKG" android.permission.WRITE_SECURE_SETTINGS || true
     sh_ dumpsys deviceidle whitelist +"$PKG" >/dev/null || true
   else
     exit 1

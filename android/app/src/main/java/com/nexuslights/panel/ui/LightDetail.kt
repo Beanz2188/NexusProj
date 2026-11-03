@@ -61,7 +61,7 @@ import androidx.compose.ui.unit.sp
 import com.nexuslights.panel.data.Light
 import com.nexuslights.panel.data.LinkStatus
 import com.nexuslights.panel.data.LightState
-import com.nexuslights.panel.protocol.ColorMath
+import com.nexuslights.panel.data.ColorMath
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.min

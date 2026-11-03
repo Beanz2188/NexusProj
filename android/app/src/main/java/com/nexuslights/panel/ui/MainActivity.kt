@@ -113,7 +113,7 @@ class MainActivity : ComponentActivity() {
 
     private fun requestMissingPermissions() {
         if (Kiosk.isDeviceOwner(this)) return // granted by policy
-        val missing = listOf(Manifest.permission.CAMERA, Manifest.permission.ACCESS_FINE_LOCATION)
+        val missing = listOf(Manifest.permission.CAMERA)
             .filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
         if (missing.isNotEmpty()) permissionLauncher.launch(missing.toTypedArray())
     }
@@ -137,7 +137,8 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun PanelRoot(app: PanelApp, activity: Activity) {
     val lights by app.lights.lights.collectAsState()
-    val hk by app.homekit.status.collectAsState()
+    val bridge by app.bridge.status.collectAsState()
+    val modes by app.lights.modes.collectAsState()
     val motion by app.presence.motion.collectAsState()
     val device by app.device.state.collectAsState()
     val homeName by app.settings.homeName.collectAsState()
@@ -155,26 +156,28 @@ private fun PanelRoot(app: PanelApp, activity: Activity) {
         HomeScreen(
             homeName = homeName,
             lights = lights,
-            homekit = hk,
+            modes = modes,
+            bridge = bridge,
             motion = motion,
             device = device,
-            onToggle = { app.lights.toggle(it.config.address) },
-            onOpenLight = { openLight = it.config.address },
+            onToggle = { app.lights.toggle(it.config.id) },
+            onOpenLight = { openLight = it.config.id },
             onScene = { app.lights.applyScene(it) },
+            onMode = { app.lights.setMode(it.id, !it.on) },
             onAllOff = { app.lights.allOff() },
             onOpenSettings = { settingsOpen = true },
         )
 
-        val detail = lights.firstOrNull { it.config.address == openLight }
+        val detail = lights.firstOrNull { it.config.id == openLight }
         AnimatedVisibility(detail != null, enter = fadeIn() + scaleIn(initialScale = 0.94f), exit = fadeOut() + scaleOut(targetScale = 0.94f)) {
             // keep the last light while the exit animation runs
             val l = detail ?: return@AnimatedVisibility
             LightDetail(
                 light = l,
                 onClose = { openLight = null },
-                onPower = { app.lights.setPower(l.config.address, it) },
-                onBrightness = { app.lights.setBrightness(l.config.address, it) },
-                onColor = { h, s -> app.lights.setColor(l.config.address, h, s) },
+                onPower = { app.lights.setPower(l.config.id, it) },
+                onBrightness = { app.lights.setBrightness(l.config.id, it) },
+                onColor = { h, s -> app.lights.setColor(l.config.id, h, s) },
             )
         }
 

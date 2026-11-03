@@ -45,17 +45,8 @@ object Kiosk {
         val admin = admin(ctx)
         val pkg = ctx.packageName
         runCatching {
-            for (p in listOf(
-                Manifest.permission.CAMERA,
-                Manifest.permission.ACCESS_FINE_LOCATION,
-                Manifest.permission.ACCESS_COARSE_LOCATION,
-                Manifest.permission.WRITE_EXTERNAL_STORAGE,
-                Manifest.permission.READ_EXTERNAL_STORAGE,
-            )) dpm.setPermissionGrantState(admin, pkg, p, DevicePolicyManager.PERMISSION_GRANT_STATE_GRANTED)
+            for (p in listOf(Manifest.permission.CAMERA)) dpm.setPermissionGrantState(admin, pkg, p, DevicePolicyManager.PERMISSION_GRANT_STATE_GRANTED)
         }.onFailure { Log.w(TAG, "grant permissions", it) }
-        // Keep Wi-Fi up with the screen off so HomeKit stays reachable.
-        @Suppress("DEPRECATION")
-        runCatching { dpm.setGlobalSetting(admin, Settings.Global.WIFI_SLEEP_POLICY, Settings.Global.WIFI_SLEEP_POLICY_NEVER.toString()) }
         runCatching { dpm.setKeyguardDisabled(admin, true) }
 
         if (isSuspended(ctx)) return

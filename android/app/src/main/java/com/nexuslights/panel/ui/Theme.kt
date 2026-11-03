@@ -1,7 +1,9 @@
 package com.nexuslights.panel.ui
 
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Bed
+import androidx.compose.material.icons.rounded.MusicNote
 import androidx.compose.material.icons.rounded.Bedtime
 import androidx.compose.material.icons.rounded.CenterFocusStrong
 import androidx.compose.material.icons.rounded.Computer
@@ -72,6 +74,16 @@ fun iconFor(icon: String): ImageVector = when (LightIcon.of(icon)) {
     LightIcon.TV -> Icons.Rounded.Tv
     LightIcon.BED -> Icons.Rounded.Bed
     LightIcon.DESK -> Icons.Rounded.Computer
+}
+
+fun modeIcon(name: String): ImageVector {
+    val n = name.lowercase()
+    return when {
+        "tv" in n || "ambi" in n -> Icons.Rounded.Tv
+        "music" in n -> Icons.Rounded.MusicNote
+        "rainbow" in n -> Icons.Rounded.AutoAwesome
+        else -> Icons.Rounded.AutoAwesome
+    }
 }
 
 fun sceneIcon(id: String): ImageVector = when (id) {

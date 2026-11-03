@@ -65,7 +65,8 @@ import com.nexuslights.panel.data.Light
 import com.nexuslights.panel.data.LinkStatus
 import com.nexuslights.panel.data.Scene
 import com.nexuslights.panel.data.Scenes
-import com.nexuslights.panel.homekit.HomeKitBridge
+import com.nexuslights.panel.bridge.BridgeClient
+import com.nexuslights.panel.data.ModeSwitch
 import com.nexuslights.panel.system.DeviceStatus
 import kotlinx.coroutines.delay
 import java.text.SimpleDateFormat
@@ -120,12 +121,14 @@ fun AmbientBackground(lights: List<Light>) {
 fun HomeScreen(
     homeName: String,
     lights: List<Light>,
-    homekit: HomeKitBridge.Status,
+    modes: List<ModeSwitch>,
+    bridge: BridgeClient.Status,
     motion: Boolean,
     device: DeviceStatus.State,
     onToggle: (Light) -> Unit,
     onOpenLight: (Light) -> Unit,
     onScene: (Scene) -> Unit,
+    onMode: (ModeSwitch) -> Unit,
     onAllOff: () -> Unit,
     onOpenSettings: () -> Unit,
 ) {
@@ -137,17 +140,28 @@ fun HomeScreen(
         verticalArrangement = Arrangement.spacedBy(12.dp),
         modifier = Modifier.fillMaxSize(),
     ) {
-        item(span = full) { Header(homeName, lights, motion, device, homekit, onOpenSettings) }
-        item(span = full) { SummaryRow(lights, motion, homekit, onAllOff, onOpenSettings) }
+        item(span = full) { Header(homeName, lights, motion, device, bridge, onOpenSettings) }
+        item(span = full) { SummaryRow(lights, motion, bridge, onAllOff, onOpenSettings) }
 
         item(span = full) { SectionTitle("Scenes") }
         items(Scenes.ALL, key = { "scene-" + it.id }) { scene ->
             SceneTile(scene, active = isSceneActive(scene, lights), onClick = { onScene(scene) })
         }
 
+        if (modes.isNotEmpty()) {
+            item(span = full) { SectionTitle("Modes") }
+            items(modes, key = { "mode-" + it.id }) { m ->
+                BaseTile(
+                    on = m.on, icon = modeIcon(m.name), iconColor = Palette.orange,
+                    title = m.name, subtitle = if (m.on) "On" else "Off",
+                    onClick = { onMode(m) },
+                )
+            }
+        }
+
         if (lights.isEmpty()) {
             item(span = full) { SectionTitle("Lights") }
-            item(span = full) { EmptyLights(onOpenSettings) }
+            item(span = full) { EmptyLights(bridge, onOpenSettings) }
         } else {
             val rooms = lights.groupBy { it.config.room }
             for ((room, inRoom) in rooms) {
@@ -161,7 +175,7 @@ fun HomeScreen(
 }
 
 private fun LazyGridScope.lightItems(lights: List<Light>, onToggle: (Light) -> Unit, onOpen: (Light) -> Unit) {
-    items(lights, key = { it.config.address }) { light ->
+    items(lights, key = { it.config.id }) { light ->
         LightTile(light, onClick = { onToggle(light) }, onLongClick = { onOpen(light) })
     }
 }
@@ -177,7 +191,7 @@ private fun Header(
     lights: List<Light>,
     motion: Boolean,
     device: DeviceStatus.State,
-    homekit: HomeKitBridge.Status,
+    bridge: BridgeClient.Status,
     onOpenSettings: () -> Unit,
 ) {
     val now = rememberNow()
@@ -185,7 +199,7 @@ private fun Header(
     val date = remember(now / 3600000) { SimpleDateFormat("EEEE, d MMMM", Locale.getDefault()).format(Date(now)) }
     Column(Modifier.fillMaxWidth().padding(bottom = 4.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            StatusIcons(device, homekit)
+            StatusIcons(device, bridge)
             Spacer(Modifier.weight(1f))
             Text(date, color = Palette.subText, fontSize = 14.sp, fontWeight = FontWeight.Medium)
         }
@@ -210,7 +224,7 @@ private fun Header(
 }
 
 @Composable
-private fun StatusIcons(device: DeviceStatus.State, homekit: HomeKitBridge.Status) {
+private fun StatusIcons(device: DeviceStatus.State, bridge: BridgeClient.Status) {
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         Icon(
             if (device.wifi) Icons.Rounded.Wifi else Icons.Rounded.WifiOff, null,
@@ -233,10 +247,10 @@ private fun StatusIcons(device: DeviceStatus.State, homekit: HomeKitBridge.Statu
         }
         Icon(
             Icons.Rounded.Home, null, modifier = Modifier.size(16.dp),
-            tint = when {
-                homekit.paired && homekit.running -> Palette.orange
-                homekit.running -> Palette.subText
-                else -> Palette.faint
+            tint = when (bridge.health) {
+                BridgeClient.Health.CONNECTED -> Palette.orange
+                BridgeClient.Health.CONNECTING -> Palette.subText
+                else -> Palette.red
             },
         )
     }
@@ -246,7 +260,7 @@ private fun StatusIcons(device: DeviceStatus.State, homekit: HomeKitBridge.Statu
 private fun SummaryRow(
     lights: List<Light>,
     motion: Boolean,
-    homekit: HomeKitBridge.Status,
+    bridge: BridgeClient.Status,
     onAllOff: () -> Unit,
     onOpenSettings: () -> Unit,
 ) {
@@ -265,10 +279,12 @@ private fun SummaryRow(
             title = "Motion",
             value = if (motion) "Detected" else "Clear",
         )
-        if (!homekit.paired) {
+        if (bridge.health != BridgeClient.Health.CONNECTED && bridge.health != BridgeClient.Health.CONNECTING) {
             Chip(
-                icon = Icons.Rounded.Home, iconTint = Palette.orange,
-                title = "Apple Home", value = "Set Up", onClick = onOpenSettings,
+                icon = Icons.Rounded.Home, iconTint = Palette.red,
+                title = "Bridge",
+                value = if (bridge.health == BridgeClient.Health.NOT_CONFIGURED) "Set Up" else "Offline",
+                onClick = onOpenSettings,
             )
         }
     }
@@ -363,8 +379,7 @@ fun LightTile(light: Light, onClick: () -> Unit, onLongClick: () -> Unit) {
     val s = light.state
     val (subtitle, subColor) = when (light.link) {
         LinkStatus.FAILED -> "No Response" to Palette.red
-        LinkStatus.CONNECTING, LinkStatus.DISCONNECTED -> (if (s.on) "On · Connecting" else "Connecting…") to null
-        LinkStatus.CONNECTED, LinkStatus.IDLE -> (if (s.on) "${s.brightness}%" else "Off") to null
+        LinkStatus.CONNECTED, LinkStatus.IDLE, LinkStatus.UNKNOWN -> (if (s.on) "${s.brightness}%" else "Off") to null
     }
     BaseTile(
         on = s.on,
@@ -392,7 +407,7 @@ private fun SceneTile(scene: Scene, active: Boolean, onClick: () -> Unit) {
 }
 
 @Composable
-private fun EmptyLights(onAdd: () -> Unit) {
+private fun EmptyLights(bridge: BridgeClient.Status, onAdd: () -> Unit) {
     Column(
         Modifier
             .fillMaxWidth()
@@ -403,11 +418,25 @@ private fun EmptyLights(onAdd: () -> Unit) {
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Box(Modifier.size(56.dp).clip(CircleShape).background(Palette.orange), contentAlignment = Alignment.Center) {
-            Icon(Icons.Rounded.Add, null, tint = Color.White, modifier = Modifier.size(30.dp))
+            Icon(Icons.Rounded.Home, null, tint = Color.White, modifier = Modifier.size(30.dp))
         }
         Spacer(Modifier.height(12.dp))
-        Text("Add your lights", color = Palette.text, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
-        Text("Tap to scan for nearby strips", color = Palette.subText, fontSize = 14.sp)
+        Text(
+            when (bridge.health) {
+                BridgeClient.Health.CONNECTED -> "No lights on the bridge yet"
+                BridgeClient.Health.CONNECTING -> "Connecting to the bridge…"
+                BridgeClient.Health.NOT_CONFIGURED -> "Connect to your bridge"
+                else -> "Can't reach the bridge"
+            },
+            color = Palette.text, fontSize = 18.sp, fontWeight = FontWeight.SemiBold,
+        )
+        Text(
+            when (bridge.health) {
+                BridgeClient.Health.CONNECTED -> "Add lights on the Mac with nexus-lights add"
+                else -> bridge.detail.ifBlank { "Tap to open Settings" }
+            },
+            color = Palette.subText, fontSize = 14.sp, textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+        )
     }
 }
 

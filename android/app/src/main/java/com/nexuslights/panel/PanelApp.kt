@@ -6,26 +6,20 @@ import android.content.Context
 import android.content.Intent
 import android.util.Log
 import androidx.core.content.ContextCompat
-import com.nexuslights.panel.ble.BleController
-import com.nexuslights.panel.ble.BleScanner
-import com.nexuslights.panel.data.ConfigImport
+import com.nexuslights.panel.bridge.BridgeClient
 import com.nexuslights.panel.data.LightRepository
 import com.nexuslights.panel.data.PanelSettings
-import com.nexuslights.panel.homekit.HomeKitBridge
 import com.nexuslights.panel.kiosk.Kiosk
 import com.nexuslights.panel.sensors.PresenceController
 import com.nexuslights.panel.service.PanelService
 import com.nexuslights.panel.system.DeviceStatus
-import com.nexuslights.panel.wifi.WifiLightController
+import kotlinx.coroutines.launch
 
 /** Holds the app-wide singletons. Started once per process. */
 class PanelApp : Application() {
     lateinit var settings: PanelSettings; private set
-    lateinit var ble: BleController; private set
-    lateinit var wifi: WifiLightController; private set
-    lateinit var scanner: BleScanner; private set
+    lateinit var bridge: BridgeClient; private set
     lateinit var lights: LightRepository; private set
-    lateinit var homekit: HomeKitBridge; private set
     lateinit var presence: PresenceController; private set
     lateinit var device: DeviceStatus; private set
 
@@ -34,15 +28,16 @@ class PanelApp : Application() {
     override fun onCreate() {
         super.onCreate()
         settings = PanelSettings(this)
-        ble = BleController(this)
-        ble.forceOnDemand = settings.bleOnDemand.value
-        wifi = WifiLightController()
-        scanner = BleScanner(this)
-        lights = LightRepository(this, ble, wifi)
-        homekit = HomeKitBridge(this, lights) { settings.homeName.value }
+        settings.importProvisioning(this)
+        bridge = BridgeClient(
+            this,
+            url = { settings.bridgeUrl.value },
+            token = { settings.token.value },
+            onUrlDiscovered = { settings.setBridgeUrl(it) },
+        )
+        lights = LightRepository(bridge, settings)
         presence = PresenceController(this, settings)
         device = DeviceStatus(this)
-        ConfigImport.importPending(this, lights)
         Kiosk.applyPolicies(this)
     }
 
@@ -50,12 +45,15 @@ class PanelApp : Application() {
     fun startBackground() {
         if (started) return
         started = true
-        Log.i("PanelApp", "starting background services")
-        presence.onMotionChanged = { homekit.setMotion(it) }
-        presence.onLux = { homekit.setLux(it) }
+        Log.i("PanelApp", "starting; bridge ${settings.bridgeUrl.value.ifBlank { "(not set)" }}")
+        presence.onMotionChanged = { bridge.reportPanel(motion = it) }
+        presence.onLux = { bridge.reportPanel(lux = it) }
         presence.start()
-        homekit.start()
         device.start()
+        // Poll the bridge only while there's something on screen.
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main).launch {
+            presence.screen.collect { bridge.setActive(it != com.nexuslights.panel.sensors.ScreenState.OFF) }
+        }
     }
 
     fun ensureServiceRunning() {
@@ -67,7 +65,7 @@ class PanelApp : Application() {
     }
 }
 
-/** Boot / app update: bring the service (and with it the HomeKit bridge) back up. */
+/** Boot / app update: bring the service back up. */
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         PanelApp.of(context).ensureServiceRunning()

@@ -88,6 +88,14 @@ Pairing state is written to `nexuslights_homekit.state` in the working
 directory; don't commit or share that file, it's this bridge's HomeKit
 identity.
 
+## Wall panel (tablet)
+
+`android/` is a wall-mounted touchscreen remote for this bridge: an Android
+kiosk app that controls the lights through the bridge's panel API
+(`nexuslights/panel_api.py`, on the dashboard port, token in
+`~/.config/nexuslights/panel_token`). The bridge stays the only thing talking
+to the strips and to Apple Home. See [android/README.md](android/README.md).
+
 ## Tuning a protocol against real hardware
 
 BLE RGB strip protocols vary slightly between clones even within the

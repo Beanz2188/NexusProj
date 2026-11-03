@@ -1,263 +1,140 @@
 package com.nexuslights.panel.data
 
-import android.content.Context
-import android.util.Log
-import com.nexuslights.panel.ble.Cmd
-import com.nexuslights.panel.ble.LightLinks
-import com.nexuslights.panel.protocol.LightProtocol
-import com.nexuslights.panel.system.Backup
+import android.os.SystemClock
+import com.nexuslights.panel.bridge.BridgeClient
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
-import kotlinx.coroutines.launch
-import org.json.JSONArray
-import org.json.JSONObject
-import java.io.File
-import java.util.concurrent.CopyOnWriteArrayList
+import kotlin.math.roundToInt
 
 /**
- * Single source of truth for configured lights and their state. Everything
- * (touch UI, HomeKit, scenes, motion automations) goes through here, so all
- * of them stay in sync and every change is persisted + sent over BLE.
+ * What the UI sees: the bridge's lights, with
+ *  - optimistic state, so a tap shows instantly instead of after the next
+ *    poll (it's dropped once the bridge reports the same thing, or after a
+ *    few seconds if it never does)
+ *  - the panel's own room/icon choices merged in
  */
-class LightRepository(private val context: Context, private val ble: LightLinks, private val wifi: LightLinks) {
-
-    enum class Source { UI, HOMEKIT, SCENE, AUTOMATION }
-
-    fun interface ChangeListener {
-        fun onChanged(address: String, old: LightState?, new: LightState?)
-    }
-
-    private val file = File(context.filesDir, "lights.json")
+class LightRepository(
+    private val client: BridgeClient,
+    private val settings: PanelSettings,
+) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
-    private val _configs = MutableStateFlow<List<LightConfig>>(emptyList())
-    private val _states = MutableStateFlow<Map<String, LightState>>(emptyMap())
-    private val listeners = CopyOnWriteArrayList<ChangeListener>()
-
-    val configs: StateFlow<List<LightConfig>> = _configs.asStateFlow()
-    val states: StateFlow<Map<String, LightState>> = _states.asStateFlow()
-
-    val lights: StateFlow<List<Light>> = combine(_configs, _states, ble.links, wifi.links) { cfgs, st, bl, wl ->
-        cfgs.map { Light(it, st[it.address] ?: LightState(), bl[it.address] ?: wl[it.address] ?: LinkStatus.DISCONNECTED) }
-    }.stateIn(scope, SharingStarted.Eagerly, emptyList())
-
-    /** One protocol instance per light: some keep state (LEDnetWF IOTWF's sequence counter). */
-    private val protocols = java.util.concurrent.ConcurrentHashMap<String, LightProtocol>()
-
-    private fun protoFor(cfg: LightConfig): LightProtocol {
-        val existing = protocols[cfg.address]
-        if (existing != null && existing.id == cfg.protocol) return existing
-        return LightProtocol.create(cfg.protocol).also { protocols[cfg.address] = it }
-    }
-
-    private fun linksFor(cfg: LightConfig): LightLinks =
-        if (cfg.protocolInfo.transport == LightProtocol.Transport.WIFI) wifi else ble
-
-    private fun publishDevices() {
-        ble.setKnownDevices(_configs.value)
-        wifi.setKnownDevices(_configs.value)
-    }
-
-    fun retryAll() { ble.retryAll(); wifi.retryAll() }
+    private data class Override(val state: LightState, val at: Long)
+    private val overrides = MutableStateFlow<Map<String, Override>>(emptyMap())
 
     init {
-        load()
-        publishDevices()
+        client.onFresh = { pruneOverrides() }
     }
 
-    fun addListener(l: ChangeListener) = listeners.add(l)
-    fun removeListener(l: ChangeListener) = listeners.remove(l)
-
-    fun config(address: String) = _configs.value.firstOrNull { it.address == address }
-    fun state(address: String) = _states.value[address] ?: LightState()
-
-    // ---- configuration ---------------------------------------------------
-
-    @Synchronized
-    fun addOrUpdate(cfg: LightConfig) {
-        val addr = cfg.address.uppercase()
-        val c = cfg.copy(address = addr)
-        _configs.update { list ->
-            if (list.any { it.address == addr }) list.map { if (it.address == addr) c else it } else list + c
+    val lights: StateFlow<List<Light>> = combine(
+        client.snapshot, client.status, overrides, settings.customizations,
+    ) { snap, status, ov, custom ->
+        val reachable = status.health == BridgeClient.Health.CONNECTED
+        snap.lights.map { r ->
+            val c = custom[r.id]
+            val cfg = LightConfig(
+                id = r.id, name = r.name, protocol = r.protocol, supportsColor = r.color,
+                room = c?.room ?: "Home", icon = c?.icon ?: LightIcon.guess(r.name).id,
+            )
+            val remote = r.toState()
+            val link = when {
+                !reachable -> LinkStatus.UNKNOWN
+                r.connected -> LinkStatus.CONNECTED
+                r.onDemand -> LinkStatus.IDLE
+                else -> LinkStatus.FAILED
+            }
+            Light(cfg, ov[r.id]?.state ?: remote, link)
         }
-        _states.update { if (it.containsKey(addr)) it else it + (addr to LightState()) }
-        save()
-        publishDevices()
-        listeners.forEach { it.onChanged(addr, null, state(addr)) }
+    }.stateIn(scope, SharingStarted.Eagerly, emptyList())
+
+    val modes: StateFlow<List<ModeSwitch>> = client.snapshot
+        .map { s -> s.switches.map { ModeSwitch(it.id, it.name, it.on) } }
+        .stateIn(scope, SharingStarted.Eagerly, emptyList())
+
+    private fun BridgeClient.RemoteLight.toState() = LightState(
+        on = on,
+        brightness = brightness,
+        hue = hue ?: 40f,
+        saturation = (saturation ?: 10f) / 100f,
+    )
+
+    fun state(id: String) = lights.value.firstOrNull { it.config.id == id }?.state ?: LightState()
+
+    // ---- control -----------------------------------------------------------
+
+    fun toggle(id: String) = setPower(id, !state(id).on)
+
+    fun setPower(id: String, on: Boolean) {
+        optimistic(id) { it.copy(on = on) }
+        client.sendLight(id, mapOf("on" to on))
     }
 
-    @Synchronized
-    fun remove(address: String) {
-        val old = _states.value[address]
-        _configs.update { list -> list.filterNot { it.address == address } }
-        _states.update { it - address }
-        protocols.remove(address)
-        save()
-        publishDevices()
-        listeners.forEach { it.onChanged(address, old, null) }
+    /** Like Apple Home: moving brightness on a light that's off turns it on. */
+    fun setBrightness(id: String, percent: Int) {
+        val p = percent.coerceIn(1, 100)
+        optimistic(id) { it.copy(on = true, brightness = p) }
+        client.sendLight(id, mapOf("on" to true, "brightness" to p))
     }
 
-    // ---- control ---------------------------------------------------------
-
-    fun setPower(address: String, on: Boolean, source: Source = Source.UI) =
-        mutate(address, source) { it.copy(on = on) }
-
-    fun toggle(address: String, source: Source = Source.UI) =
-        mutate(address, source) { it.copy(on = !it.on) }
-
-    /** Setting brightness on a light that's off turns it on, like Apple Home. */
-    fun setBrightness(address: String, percent: Int, source: Source = Source.UI) =
-        mutate(address, source) { it.copy(brightness = percent.coerceIn(1, 100), on = true) }
-
-    fun setColor(address: String, hue: Float, saturation: Float, source: Source = Source.UI) =
-        mutate(address, source) { it.copy(hue = hue, saturation = saturation.coerceIn(0f, 1f), on = true) }
-
-    /** HomeKit sets hue and saturation as two separate writes; don't force power on. */
-    fun setHue(address: String, hue: Float, source: Source) = mutate(address, source) { it.copy(hue = hue) }
-    fun setSaturation(address: String, sat: Float, source: Source) =
-        mutate(address, source) { it.copy(saturation = sat.coerceIn(0f, 1f)) }
+    fun setColor(id: String, hue: Float, saturation: Float) {
+        val s = saturation.coerceIn(0f, 1f)
+        optimistic(id) { it.copy(on = true, hue = hue, saturation = s) }
+        client.sendLight(id, mapOf("on" to true, "hue" to hue.toDouble(), "saturation" to (s * 100.0)))
+    }
 
     fun applyScene(scene: Scene) {
-        _configs.value.forEach { cfg ->
-            if (scene.state == null) setPower(cfg.address, false, Source.SCENE)
-            else mutate(cfg.address, Source.SCENE) { scene.state }
-        }
-    }
-
-    fun allOff(source: Source = Source.UI) = _configs.value.forEach { setPower(it.address, false, source) }
-
-    /** HomeKit "identify": blink twice, then restore. */
-    fun identify(address: String) {
-        val cfg = config(address) ?: return
-        scope.launch {
-            val flash = LightState(on = true, brightness = 100, hue = 0f, saturation = 0f)
-            val dark = LightState(on = false)
-            repeat(2) {
-                push(cfg, flash, dark, coalesce = false); delay(400)
-                push(cfg, dark, flash, coalesce = false); delay(400)
-            }
-            push(cfg, state(address), dark, coalesce = false)
-        }
-    }
-
-    /** Re-send the stored state to a light (e.g. after it reconnects / power cycles). */
-    fun resync(address: String) {
-        val cfg = config(address) ?: return
-        push(cfg, state(address))
-    }
-
-    private fun mutate(address: String, source: Source, f: (LightState) -> LightState) {
-        val cfg = config(address) ?: return
-        var old: LightState? = null
-        var new: LightState? = null
-        _states.update { map ->
-            val o = map[address] ?: LightState()
-            val n = f(o)
-            old = o; new = n
-            if (n == o) map else map + (address to n)
-        }
-        val o = old ?: return
-        val n = new ?: return
-        if (o == n) return
-        push(cfg, n, o)
-        saveDebounced()
-        Log.d(TAG, "$source ${cfg.name}: $o -> $n")
-        listeners.forEach { it.onChanged(address, o, n) }
-    }
-
-    /**
-     * Turn a state change into frames, following the same per-protocol rules
-     * as the Python bridge:
-     *  - power_off_disconnects (MrStar): "off" is brightness 0, never power_off
-     *  - color_command_includes_brightness: fold brightness into RGB, otherwise
-     *    send the full-value color plus a separate brightness command
-     *  - brightness-only lights (Wi-Fi dimmer): just brightness
-     */
-    private fun push(cfg: LightConfig, s: LightState, old: LightState? = null, coalesce: Boolean = true) {
-        val p = protoFor(cfg)
-        val cmds = mutableListOf<Cmd>()
-        if (!s.on) {
-            val off = if (p.powerOffDisconnects) p.setBrightness(0) else p.powerOff()
-            cmds += Cmd(off ?: p.powerOff(), power = true)
-        } else {
-            if (old == null || !old.on) cmds += Cmd(p.powerOn(), power = true)
-            when {
-                !p.supportsColor -> p.setBrightness(s.brightness)?.let { cmds += Cmd(it) }
-                p.colorIncludesBrightness -> {
-                    val (r, g, b) = s.rgb(); cmds += Cmd(p.setRgb(r, g, b))
+        lights.value.forEach { l ->
+            val id = l.config.id
+            val target = scene.state
+            if (target == null) {
+                setPower(id, false)
+            } else {
+                optimistic(id) { target }
+                val cmd = mutableMapOf<String, Any>("on" to true, "brightness" to target.brightness)
+                if (l.config.supportsColor) {
+                    cmd["hue"] = target.hue.toDouble()
+                    cmd["saturation"] = (target.saturation * 100.0)
                 }
-                else -> {
-                    val (r, g, b) = s.displayRgb(); cmds += Cmd(p.setRgb(r, g, b))
-                    p.setBrightness(s.brightness)?.let { cmds += Cmd(it) }
-                }
+                client.sendLight(id, cmd)
             }
         }
-        linksFor(cfg).send(cfg.address, cmds, coalesce)
     }
 
-    // ---- persistence -----------------------------------------------------
+    fun allOff() = lights.value.filter { it.state.on }.forEach { setPower(it.config.id, false) }
 
-    private var saveJob: kotlinx.coroutines.Job? = null
-    private fun saveDebounced() {
-        saveJob?.cancel()
-        saveJob = scope.launch { delay(1500); save() }
+    fun setMode(id: String, on: Boolean) = client.sendSwitch(id, on)
+
+    // ---- optimistic state ----------------------------------------------------
+
+    private fun optimistic(id: String, f: (LightState) -> LightState) {
+        val next = f(state(id))
+        overrides.update { it + (id to Override(next, SystemClock.elapsedRealtime())) }
     }
 
-    @Synchronized
-    private fun save() {
-        val arr = JSONArray()
-        for (c in _configs.value) {
-            val s = state(c.address)
-            arr.put(
-                JSONObject()
-                    .put("address", c.address).put("name", c.name).put("protocol", c.protocol)
-                    .put("room", c.room).put("icon", c.icon).put("onDemand", c.onDemand)
-                    .put("state", JSONObject().put("on", s.on).put("brightness", s.brightness)
-                        .put("hue", s.hue.toDouble()).put("saturation", s.saturation.toDouble()))
-            )
-        }
-        val text = JSONObject().put("lights", arr).toString(2)
-        val tmp = File(file.parentFile, file.name + ".tmp")
-        tmp.writeText(text)
-        tmp.renameTo(file)
-        Backup.save(context, file.name, text)
-    }
-
-    private fun load() {
-        Backup.restoreIfMissing(context, file.name, file)
-        if (!file.exists()) return
-        runCatching {
-            val arr = JSONObject(file.readText()).getJSONArray("lights")
-            val cfgs = mutableListOf<LightConfig>()
-            val st = mutableMapOf<String, LightState>()
-            for (i in 0 until arr.length()) {
-                val o = arr.getJSONObject(i)
-                val c = LightConfig(
-                    o.getString("address"), o.getString("name"), o.getString("protocol"),
-                    o.optString("room", "Home"), o.optString("icon", LightIcon.STRIP.id),
-                    o.optBoolean("onDemand", false),
-                )
-                cfgs += c
-                o.optJSONObject("state")?.let { s ->
-                    st[c.address] = LightState(
-                        s.optBoolean("on"), s.optInt("brightness", 100),
-                        s.optDouble("hue", 32.0).toFloat(), s.optDouble("saturation", 0.55).toFloat(),
-                    )
-                }
+    /** Drop overrides the bridge has caught up with, or that are too old to trust. */
+    private fun pruneOverrides() {
+        val now = SystemClock.elapsedRealtime()
+        val remote = client.snapshot.value.lights.associateBy { it.id }
+        overrides.update { ov ->
+            ov.filter { (id, o) ->
+                val r = remote[id]?.toState() ?: return@filter false
+                val matches = r.on == o.state.on && (!o.state.on || (
+                    r.brightness == o.state.brightness &&
+                        (remote[id]?.color != true ||
+                            ((r.hue - o.state.hue).roundToInt() == 0 &&
+                                ((r.saturation - o.state.saturation) * 100).roundToInt() == 0))))
+                !matches && now - o.at < OVERRIDE_MS
             }
-            _configs.value = cfgs
-            _states.value = st
-        }.onFailure { Log.e(TAG, "Failed to load lights.json", it) }
+        }
     }
 
-    companion object { private const val TAG = "LightRepo" }
+    companion object { private const val OVERRIDE_MS = 6_000L }
 }

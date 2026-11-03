@@ -1,59 +1,88 @@
 # Nexus Home: tablet wall panel
 
 An Android app that turns the OTEETO K7 tablet (MT6737M, Android 8.1; its
-About screen says 13, but it isn't) into a dedicated light panel. It replaces
-`nexus-lights bridge` on the MacBook Air:
+About screen says 13, but it isn't) into a wall-mounted touchscreen **remote for
+the nexuslights bridge on the MacBook Air**.
 
-- controls every strip directly over Bluetooth (all seven nexuslights
-  protocols, byte-for-byte from the `air-bridge` branch) plus the flux_led
-  Wi-Fi dimmer
-- is the Apple Home bridge itself (HomeKit), and also exposes the panel's
-  motion sensor and light sensor to Apple Home
-- runs as a locked-down kiosk: no other apps, no status bar, boots straight
-  into the panel
-- wakes when someone walks up (front camera), knocks on it or waves at it;
-  dims to a clock and then turns the screen off when idle
+The Air's bridge stays in charge: it talks to the strips over Bluetooth and is
+what Apple Home pairs with. The tablet never touches the lights (its Bluetooth
+is turned off). It sends commands to the bridge's panel API over Wi-Fi, so a tap
+on the panel shows up in the Home app instantly, and changes made from Home,
+Siri or automations show up on the panel.
+
+```
+ tablet  --Wi-Fi, HTTP + token-->  MacBook Air: nexus-lights bridge  --BLE-->  strips
+                                              |
+                                              +--HomeKit-->  Apple Home
+```
+
+The panel:
+
+- Apple Home-style tiles for every light; tap to toggle, hold for a brightness
+  slider and color wheel. Also scenes, plus mode tiles for the bridge's
+  TV Ambilight / Rainbow / Music Art Sync switches.
+- Locked-down kiosk: no other apps, no status bar, boots straight into the panel.
+- Wakes when someone walks up (front camera), knocks or waves; dims to a clock,
+  then turns the screen off when idle; auto brightness from the light sensor.
+- Optional: reports its motion and light level to the bridge, which can show
+  them in Apple Home as "Wall Panel Motion" / "Wall Panel Light Level".
 
 The prebuilt APK is `dist/nexus-panel.apk`, so the Mac doesn't need the
 Android SDK.
 
-## Setting up the tablet (run on the Mac the tablet is plugged into)
+## 1. Update the bridge on the Air
+
+The panel API (`nexuslights/panel_api.py`) is new, so the Air needs this
+branch's nexuslights. On the Air, in its NexusProj checkout:
+
+```bash
+git fetch origin claude/blissful-hypatia-b2c2d4
+git merge origin/claude/blissful-hypatia-b2c2d4
+```
+
+Then restart `nexus-lights bridge` with the same flags as before. To also get
+the panel's motion and light sensors in Apple Home, add `--panel-sensors`.
+
+On start the bridge creates `~/.config/nexuslights/panel_token`; the panel needs
+it. Check that the API answers:
+
+```bash
+curl -H "Authorization: Bearer $(cat ~/.config/nexuslights/panel_token)" http://localhost:8080/api/lights
+```
+
+## 2. Set up the tablet (on the Mac it's plugged into)
 
 Requirements: `adb` (`brew install android-platform-tools`), USB debugging on,
 and the tablet showing as `device` in `adb devices`.
 
-```bash
-git fetch origin claude/blissful-hypatia-b2c2d4
-git checkout claude/blissful-hypatia-b2c2d4
-```
-
-1. **Preview what will be removed** (changes nothing):
+1. **Preview** (changes nothing):
 
    ```bash
-   android/scripts/provision.sh --dry-run --from-air you@MacBook-Air.local
+   android/scripts/provision.sh --dry-run --from-air you@192.168.70.104
    ```
 
-2. **Provision.** This installs the app, makes it device owner, imports the
-   lights from the Air's `~/.config/nexuslights/lights.yaml`, strips the other
-   apps, applies battery settings and starts the panel:
+   `--from-air` reads the token from the Air over SSH (the Air needs System
+   Settings > General > Sharing > Remote Login). Without SSH use
+   `--bridge 192.168.70.104 --token <the token>`.
+
+2. **Install without stripping first**, and check the panel works:
 
    ```bash
-   android/scripts/provision.sh --from-air you@MacBook-Air.local --stop-air-bridge --wifi-adb
+   android/scripts/provision.sh --no-strip --from-air you@192.168.70.104
    ```
 
-   - `--from-air` copies the light list from the Air over SSH (the Air needs
-     System Settings > General > Sharing > Remote Login). Without SSH, copy
-     `lights.yaml` to this Mac and pass `--lights path/to/lights.yaml`.
-   - `--stop-air-bridge` stops the Air's bridge, because the strips accept only
-     one Bluetooth connection at a time.
-   - `--wifi-adb` lets later updates go over Wi-Fi (until the tablet reboots).
-   - If the health check at the end fails after stripping, the script puts
-     the removed apps back on its own.
+3. **Then the full lock-down**, which removes every other app (reversible):
 
-3. **Pair with Apple Home.** Remove the old "NexusLights" bridge from the Home
-   app, then Home > + > Add Accessory and scan the code on the tablet
-   (press and hold the home name at the top > Settings > Apple Home). The
-   setup code is also printed at the end of `provision.sh`.
+   ```bash
+   android/scripts/provision.sh --from-air you@192.168.70.104 --wifi-adb
+   ```
+
+   If the health check at the end fails after stripping, the script puts the
+   removed apps back on its own.
+
+Give the Air a fixed IP (a DHCP reservation on the router) if you can. If its
+address changes anyway, the panel finds it again through the bridge's HomeKit
+mDNS advert.
 
 ## Day to day
 
@@ -67,10 +96,11 @@ git checkout claude/blissful-hypatia-b2c2d4
 | Update the app | `android/scripts/update.sh` |
 | Undo everything | `android/scripts/restore.sh` |
 
-Settings covers adding/renaming lights (Bluetooth scan, or a Wi-Fi light by IP),
-motion sensitivity and mode, dim/off timing, auto brightness, "connect per
-command" for flaky radios, Apple Home pairing/reset, and **Exit kiosk mode** for
-maintenance (opens Android Settings; Home brings the panel back).
+In Settings: bridge address and token (with a connection test), each light's
+room and icon, motion mode and sensitivity, dim/off timing, auto brightness,
+and **Exit kiosk mode** for maintenance (opens Android Settings; Home brings
+the panel back). Lights themselves are added and removed on the Mac with
+`nexus-lights add` / `remove`.
 
 ## Getting the tablet back
 
@@ -79,20 +109,20 @@ list is kept in `android/scripts/state/`) and removes the app's device-owner
 status. That works because the APK is built `testOnly`. After that it's a normal
 tablet again; `adb uninstall com.nexuslights.panel` removes the app.
 
-## Building
+## Building and tests
 
 ```bash
 cd android && ./gradlew assembleRelease testReleaseUnitTest
 cp app/build/outputs/apk/release/app-release.apk dist/nexus-panel.apk
 ```
 
+`BridgeContractTest` starts `tests/panel_contract_server.py`, which runs the
+real Python panel API with fake lights, and drives it with the tablet's
+`BridgeClient`. That keeps the two sides from drifting apart. It's skipped when
+python3 with aiohttp and HAP-python isn't available. The Python side has its
+own tests in `tests/test_panel_api.py`.
+
 Signing: a key at `android/signing/nexuspanel.jks` is used if present (it is
 **not** committed), otherwise the debug key. A build signed with a different key
-can't update the installed app in place. `update.sh` handles that by
-reinstalling, and the app restores its Apple Home pairing and lights from
-`/sdcard/NexusPanel/backup`, so nothing needs re-pairing.
-
-## Not ported from the Mac (yet)
-
-Ambilight, music artwork sync, rainbow mode, the relay server and the Meross
-light stay on the Mac side. The Meross light is already in Apple Home on its own.
+can't update the installed app in place. `update.sh` then reinstalls it, after
+which `provision.sh --no-strip` reconnects it to the bridge.

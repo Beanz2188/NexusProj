@@ -1,21 +1,26 @@
 #!/usr/bin/env bash
-# Turn the OTEETO K7 tablet into a dedicated Nexus Home wall panel.
+# Turn the OTEETO K7 tablet into a Nexus Home wall panel: a touchscreen
+# remote for the nexuslights bridge on the MacBook Air. The tablet never
+# talks to the lights itself (no Bluetooth); the Air's bridge stays in charge
+# of the lights and Apple Home.
+#
 # Runs on the Mac the tablet is plugged into (USB debugging on). No taps
 # needed on the tablet unless it asks to "Allow USB debugging" once.
 #
-#   android/scripts/provision.sh [options]
+#   android/scripts/provision.sh --bridge 192.168.70.104 --from-air USER@HOST [options]
 #
-#   --lights FILE        nexuslights lights.yaml to import (default:
-#                        ~/.config/nexuslights/lights.yaml if it exists here)
-#   --from-air USER@HOST copy lights.yaml from the MacBook Air over SSH
-#   --stop-air-bridge    with --from-air: stop `nexus-lights bridge` on the Air
-#                        (the strips accept only one BLE connection at a time)
+#   --bridge URL         the Air bridge's dashboard address (host or host:port,
+#                        port defaults to 8080). Defaults to the --from-air host.
+#   --from-air USER@HOST read the panel token from the Air over SSH
+#                        (~/.config/nexuslights/panel_token)
+#   --token TOKEN        ...or give the token directly
 #   --no-strip           don't remove the tablet's other apps
 #   --dry-run            show what would be removed, change nothing
 #   --wifi-adb           afterwards, enable adb over Wi-Fi (port 5555)
 #   --force              skip the "is this the K7?" check
 #
-# Everything is reversible with android/scripts/restore.sh.
+# The Air must run a bridge with the panel API (this branch's nexuslights;
+# see android/README.md). Everything is reversible with restore.sh.
 set -euo pipefail
 
 PKG=com.nexuslights.panel
@@ -24,23 +29,23 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 APK="$HERE/../dist/nexus-panel.apk"
 STATE_DIR="$HERE/state"
 
-LIGHTS=""
+BRIDGE=""
+TOKEN=""
 FROM_AIR=""
-STOP_AIR=0
 STRIP=1
 DRY=0
 WIFI_ADB=0
 FORCE=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    --lights) LIGHTS="$2"; shift 2 ;;
+    --bridge) BRIDGE="$2"; shift 2 ;;
+    --token) TOKEN="$2"; shift 2 ;;
     --from-air) FROM_AIR="$2"; shift 2 ;;
-    --stop-air-bridge) STOP_AIR=1; shift ;;
     --no-strip) STRIP=0; shift ;;
     --dry-run) DRY=1; shift ;;
     --wifi-adb) WIFI_ADB=1; shift ;;
     --force) FORCE=1; shift ;;
-    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,25p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
 done
@@ -52,6 +57,29 @@ sh_()  { adb shell "$@" | tr -d '\r'; }
 
 command -v adb >/dev/null || { echo "adb not found. Install it: brew install android-platform-tools" >&2; exit 1; }
 [ -f "$APK" ] || { echo "APK not found at $APK" >&2; exit 1; }
+mkdir -p "$STATE_DIR"
+
+# ---------------------------------------------------------------------------
+say "Checking the bridge on the Air"
+if [ -z "$BRIDGE" ] && [ -n "$FROM_AIR" ]; then BRIDGE="${FROM_AIR#*@}"; fi
+[ -n "$BRIDGE" ] || { echo "Tell me where the bridge is: --bridge 192.168.70.104" >&2; exit 2; }
+case "$BRIDGE" in *://*) ;; *) BRIDGE="http://$BRIDGE" ;; esac
+BRIDGE="${BRIDGE%/}"
+case "${BRIDGE#*://}" in *:*) ;; *) BRIDGE="$BRIDGE:8080" ;; esac
+if [ -z "$TOKEN" ] && [ -n "$FROM_AIR" ]; then
+  TOKEN="$(ssh -o ConnectTimeout=8 "$FROM_AIR" 'cat ~/.config/nexuslights/panel_token' 2>/dev/null | tr -d '[:space:]' || true)"
+  [ -n "$TOKEN" ] && ok "read the panel token from $FROM_AIR" || warn "couldn't read ~/.config/nexuslights/panel_token on $FROM_AIR"
+fi
+[ -n "$TOKEN" ] || { echo "Need the panel token: --from-air USER@HOST, or --token (cat ~/.config/nexuslights/panel_token on the Air)" >&2; exit 2; }
+CODE="$(curl -s -o "$STATE_DIR/bridge.json" -w '%{http_code}' -m 8 -H "Authorization: Bearer $TOKEN" "$BRIDGE/api/lights" || true)"
+case "$CODE" in
+  200) ok "$BRIDGE answers: $(grep -o '"name"' "$STATE_DIR/bridge.json" | wc -l | tr -d ' ') light/switch name(s)" ;;
+  401) echo "The bridge rejected the token." >&2; exit 1 ;;
+  404) echo "The bridge at $BRIDGE has no panel API yet: update nexuslights on the Air (android/README.md) and restart it." >&2; exit 1 ;;
+  000) echo "Can't reach $BRIDGE from this Mac. Is 'nexus-lights bridge' running on the Air?" >&2; exit 1 ;;
+  *) echo "Unexpected answer from the bridge: HTTP $CODE" >&2; exit 1 ;;
+esac
+rm -f "$STATE_DIR/bridge.json"
 
 # ---------------------------------------------------------------------------
 say "Checking the tablet"
@@ -71,7 +99,6 @@ if [ "$FORCE" -eq 0 ] && [ "$MODEL" != "K7" ]; then
   echo "This doesn't look like the OTEETO K7 (model '$MODEL'). Re-run with --force if that's intended." >&2
   exit 1
 fi
-mkdir -p "$STATE_DIR"
 
 # ---------------------------------------------------------------------------
 say "Installing Nexus Home"
@@ -109,40 +136,24 @@ else
 fi
 
 if [ "$DRY" -eq 0 ]; then
-  # Lets the app flip Location on only while scanning for strips.
-  sh_ pm grant "$PKG" android.permission.WRITE_SECURE_SETTINGS || warn "couldn't grant WRITE_SECURE_SETTINGS"
-  # Keep the bridge out of Doze so Apple Home stays responsive with the screen off.
+  # Out of Doze so motion still wakes the screen after hours of idle.
   sh_ dumpsys deviceidle whitelist +"$PKG" >/dev/null || warn "couldn't whitelist from Doze"
-  ok "permissions + battery exemption"
+  ok "battery exemption"
 fi
 
 # ---------------------------------------------------------------------------
-say "Importing your lights"
-if [ -n "$FROM_AIR" ]; then
-  LIGHTS="$STATE_DIR/lights-from-air.yaml"
-  if scp -q -o ConnectTimeout=8 "$FROM_AIR:.config/nexuslights/lights.yaml" "$LIGHTS"; then
-    ok "copied lights.yaml from $FROM_AIR"
-  else
-    warn "couldn't scp from $FROM_AIR (is Remote Login on in the Air's Sharing settings?)"
-    LIGHTS=""
-  fi
-fi
-if [ -z "$LIGHTS" ] && [ -f "$HOME/.config/nexuslights/lights.yaml" ]; then
-  LIGHTS="$HOME/.config/nexuslights/lights.yaml"
-fi
-if [ -n "$LIGHTS" ] && [ -f "$LIGHTS" ]; then
-  COUNT="$(grep -c 'address:' "$LIGHTS" || true)"
-  if [ "$DRY" -eq 1 ]; then
-    ok "(dry run) would import $COUNT light(s) from $LIGHTS"
-  else
-    DEST="/sdcard/Android/data/$PKG/files"
-    sh_ mkdir -p "$DEST"
-    adb push "$LIGHTS" "$DEST/lights.yaml" >/dev/null
-    ok "pushed $COUNT light(s) from $LIGHTS (imported on next app start)"
-  fi
+say "Pointing the panel at the bridge"
+if [ "$DRY" -eq 1 ]; then
+  ok "(dry run) would configure $BRIDGE"
 else
-  warn "no lights.yaml given. Add lights on the tablet: hold the home name > Settings > Add Light"
-  warn "or re-run with --from-air you@macbook-air.local (or --lights path/to/lights.yaml)"
+  DEST="/sdcard/Android/data/$PKG/files"
+  TMP="$STATE_DIR/panel.json"
+  printf '{"bridge_url": "%s", "token": "%s"}
+' "$BRIDGE" "$TOKEN" > "$TMP"
+  sh_ mkdir -p "$DEST"
+  adb push "$TMP" "$DEST/panel.json" >/dev/null
+  rm -f "$TMP"
+  ok "$BRIDGE (read on next app start, then deleted from the tablet's storage)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -167,10 +178,12 @@ if [ "$STRIP" -eq 1 ]; then
     com.google.android.ext.shared com.android.webview com.google.android.webview
     com.android.providers.drm com.android.companiondevicemanager com.android.storagemanager
     com.android.wallpaper.livepicker com.android.wallpapercropper "
+  # one space-separated line, so every entry (including ones at line ends) matches below
+  KEEP_EXACT=" $(echo $KEEP_EXACT) "
   # Kept by pattern: overlays/resources, input methods, radios, MediaTek/vendor services...
   KEEP_RE='inputmethod|overlay|resources|wifi|bluetooth|telephony|telecom|\.ims|^com\.mediatek\.|^com\.mtk\.|^vendor\.|^com\.android\.providers\.'
   # ...except these known battery drainers / plain apps, which go anyway.
-  # (DuraSpeed in particular kills background apps, i.e. the HomeKit bridge.)
+  # (DuraSpeed in particular kills background apps, i.e. this panel.)
   JUNK_RE='mtklogger|duraspeed|callrecorder|datatransfer|fmradio|\.camera$|camera2|filemanager|gallery|music|video|soundrecorder|lbs\.em|nlpservice|calendar|email|browser|launcher|providers\.calendar|ygps|gnss\.nonframework'
 
   REMOVED_FILE="$STATE_DIR/removed-packages-$SERIAL.txt"
@@ -204,10 +217,11 @@ say "Battery tuning"
 if [ "$DRY" -eq 0 ]; then
   sh_ settings put global wifi_scan_always_enabled 0 || true   # no background Wi-Fi scans
   sh_ settings put global ble_scan_always_enabled 0 || true    # no background BLE scans by others
-  sh_ settings put global wifi_sleep_policy 2 || true          # keep Wi-Fi on with screen off (HomeKit)
+  sh_ settings put global wifi_sleep_policy 2 || true          # keep Wi-Fi on with screen off (motion reports, fast wake)
   sh_ settings put global stay_on_while_plugged_in 0 || true   # the app manages the screen itself
   sh_ settings put system screen_off_timeout 600000 || true    # fallback only; the app dims/offs sooner
-  sh_ settings put secure location_mode 0 || true              # app turns it on only while scanning
+  sh_ settings put secure location_mode 0 || true              # nothing needs location
+  sh_ cmd bluetooth_manager disable >/dev/null 2>&1 || true    # the Air talks to the lights, not the tablet
   sh_ settings put global auto_time 1 || true
   sh_ svc data disable >/dev/null 2>&1 || true                 # no mobile data on a wall panel
   ok "done"
@@ -216,7 +230,7 @@ fi
 # ---------------------------------------------------------------------------
 say "Starting the panel"
 if [ "$DRY" -eq 0 ]; then
-  sh_ am force-stop "$PKG" || true   # so it re-reads lights.yaml on start
+  sh_ am force-stop "$PKG" || true   # so it reads panel.json on start
   sh_ am start -n "$PKG/.ui.MainActivity" >/dev/null
   sleep 8
 fi
@@ -227,32 +241,20 @@ FAIL=0
 if [ "$DRY" -eq 0 ]; then
   if [ -n "$(sh_ pidof "$PKG")" ]; then ok "app running"; else warn "app is NOT running"; FAIL=1; fi
   if sh_ dumpsys wifi | grep -q "Wi-Fi is enabled"; then ok "Wi-Fi on"; else warn "Wi-Fi is off"; FAIL=1; fi
-  if sh_ settings get global bluetooth_on | grep -q 1; then ok "Bluetooth on"; else warn "Bluetooth is off"; fi
   CRASH="$(adb logcat -d -b crash 2>/dev/null | grep -A3 "$PKG" | head -20 || true)"
   if [ -n "$CRASH" ]; then warn "crash log:"; echo "$CRASH"; FAIL=1; fi
-  LINE="$(adb logcat -d -s HomeKit:I 2>/dev/null | grep 'setup code' | tail -1 || true)"
-  if [ -n "$LINE" ]; then
-    ok "$(echo "$LINE" | sed 's/.*HomeKit bridge/HomeKit bridge/')"
-  else
-    warn "HomeKit bridge hasn't reported in yet (check: android/scripts/logs.sh)"
-  fi
-  adb logcat -d 2>/dev/null | grep -E " (PanelApp|HomeKit|Ble|WifiLight|ConfigImport|Kiosk|Presence)" | tail -40 > "$STATE_DIR/last-provision-log.txt" || true
+  LINE="$(adb logcat -d -s Bridge 2>/dev/null | grep -E "connected to bridge|can't reach bridge" | tail -1 || true)"
+  case "$LINE" in
+    *"connected to bridge"*) ok "panel $(echo "$LINE" | sed 's/.*connected to bridge/connected to bridge/')" ;;
+    *) warn "panel hasn't connected to the bridge yet: ${LINE:-no log yet} (check android/scripts/logs.sh)" ;;
+  esac
+  adb logcat -d 2>/dev/null | grep -E " (PanelApp|PanelSettings|Bridge|Kiosk|Presence|CamMotion)" | tail -40 > "$STATE_DIR/last-provision-log.txt" || true
   ok "recent app log saved to $STATE_DIR/last-provision-log.txt"
 fi
 
 if [ "$FAIL" -ne 0 ] && [ "$STRIP" -eq 1 ] && [ "$DRY" -eq 0 ]; then
   warn "Something's wrong after stripping apps; putting them back to be safe."
   "$HERE/restore.sh" --apps-only || true
-fi
-
-# ---------------------------------------------------------------------------
-if [ -n "$FROM_AIR" ] && [ "$STOP_AIR" -eq 1 ] && [ "$DRY" -eq 0 ]; then
-  say "Stopping the old bridge on the Air"
-  if ssh -o ConnectTimeout=8 "$FROM_AIR" "pkill -f 'nexus-lights bridge' && echo stopped || echo 'not running'"; then
-    ok "the strips are free for the tablet now"
-  else
-    warn "couldn't reach $FROM_AIR. Stop 'nexus-lights bridge' on the Air yourself"
-  fi
 fi
 
 if [ "$WIFI_ADB" -eq 1 ] && [ "$DRY" -eq 0 ]; then
@@ -265,9 +267,9 @@ fi
 
 say "Done"
 cat <<EOF
-    Next: on your iPhone, Home app > + > Add Accessory, then scan the code shown on
-    the tablet (hold the home name at the top > Settings > Apple Home).
-    Remove the old "NexusLights" bridge from Home first so lights don't appear twice.
+    The panel controls your lights through the Air's bridge; Apple Home keeps
+    working exactly as before. Settings on the tablet: press and hold the home
+    name at the top of the screen.
 
     Update later:   android/scripts/update.sh
     Logs:           android/scripts/logs.sh

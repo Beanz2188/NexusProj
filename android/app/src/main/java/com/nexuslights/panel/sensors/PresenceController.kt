@@ -38,7 +38,8 @@ enum class ScreenState { ACTIVE, AMBIENT, OFF }
  *  - front camera motion (CameraMotionDetector)
  *  - accelerometer: a knock or bump on the tablet / wall
  *  - proximity sensor: a hand waved over the top of the screen
- * and feeds motion + ambient light level to HomeKit.
+ * and reports motion + ambient light level to the bridge (which can expose
+ * them to Apple Home as "Wall Panel" sensors).
  */
 class PresenceController(
     private val ctx: Context,
@@ -149,7 +150,7 @@ class PresenceController(
         if (_screen.value != ScreenState.ACTIVE) wake()
     }
 
-    /** Someone is there (sensor), wake the panel and tell HomeKit. */
+    /** Someone is there (sensor): wake the panel and tell the bridge. */
     private fun presence(source: String) {
         val now = SystemClock.elapsedRealtime()
         lastActivity = now
