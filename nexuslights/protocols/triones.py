@@ -20,7 +20,7 @@ from .base import LightProtocol
 
 class TrionesProtocol(LightProtocol):
     name = "triones"
-    write_characteristic = "0000ffd9-0000-1000-8000-00805f9a34fb"
+    write_characteristic = "0000ffd9-0000-1000-8000-00805f9b34fb"
     name_hints = (
         "triones",
         "ledble",
